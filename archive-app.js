@@ -2,13 +2,22 @@
  * نظام الأرشيف — Supabase (Postgres + Auth)
  * الملفات في جدول card_attachments (bytea) — بدون Supabase Storage
  *
+ * الإعداد: ملف config.js (من config.example.js) يعرّف window.ARCHIVE_SUPABASE
+ * في المتصفح لا يوجد process.env — إما هذا الملف أو أداة بناء (Vite) لحقن المتغيرات.
+ *
  * أنشئ الجداول بتشغيل الهجرة في supabase/migrations أو من SQL Editor.
- * في لوحة Supabase: Authentication → إيقاف «Confirm email» للتطوير إن لزم.
  */
 
-const SUPABASE_URL = 'https://zajewewtlxykqvcailnh.supabase.co';
-const SUPABASE_ANON_KEY =
-    'sb_publishable_xzsvplR08i4nQPRFljRoFw_5FqfUaSZ';
+const CFG =
+    typeof window !== 'undefined' && window.ARCHIVE_SUPABASE ? window.ARCHIVE_SUPABASE : {};
+const SUPABASE_URL = CFG.url || '';
+const SUPABASE_ANON_KEY = CFG.anonKey || '';
+
+if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+    console.error(
+        '[الأرشيف] أنشئ ملف config.js بجانب index.html (انسخ من config.example.js) وضع url و anonKey من Settings → API'
+    );
+}
 
 const _create =
     typeof window.supabase?.createClient === 'function'
@@ -22,6 +31,18 @@ const sb = _create(SUPABASE_URL, SUPABASE_ANON_KEY, {
         persistSession: true,
         autoRefreshToken: true,
     },
+});
+
+document.addEventListener('DOMContentLoaded', function () {
+    if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+        var m = document.createElement('div');
+        m.setAttribute('dir', 'rtl');
+        m.style.cssText =
+            'background:#fff3e0;border-bottom:2px solid #ff9800;color:#e65100;padding:14px 20px;font-size:14px;text-align:center;line-height:1.6;';
+        m.innerHTML =
+            '<strong>إعداد Supabase ناقص:</strong> أنشئ ملف <code>config.js</code> من نسخة <code>config.example.js</code> واملأ <code>url</code> و <code>anonKey</code> من لوحة المشروع → Settings → API.';
+        document.body.insertBefore(m, document.body.firstChild);
+    }
 });
 
 let currentUser = null;
