@@ -124,6 +124,23 @@ function showAlert(elementId, message, type) {
     }, 5000);
 }
 
+/** ترجمة أخطاء المصادقة الشائعة + إظهار التفاصيل في وحدة التحكم */
+function formatAuthError(error, context) {
+    if (context) console.warn('[auth]', context, error);
+    const msg = (error && error.message) || String(error);
+    const lower = msg.toLowerCase();
+    if (lower.includes('invalid login') || lower.includes('invalid credentials')) {
+        return 'البريد أو كلمة المرور غير صحيحة.';
+    }
+    if (lower.includes('email not confirmed') || msg.includes('confirm')) {
+        return 'يجب تأكيد البريد أولاً — راجع صندوق الوارد أو عطّل «Confirm email» من لوحة Supabase للتجربة.';
+    }
+    if (lower.includes('signup') && lower.includes('disabled')) {
+        return 'تسجيل الدخول بالبريد معطّل في المشروع: Authentication → Providers → Email.';
+    }
+    return msg + (error && error.status ? ` (رمز HTTP: ${error.status})` : '');
+}
+
 sb.auth.onAuthStateChange(async (_event, session) => {
     if (session?.user) {
         currentUser = session.user;
@@ -155,14 +172,22 @@ sb.auth.onAuthStateChange(async (_event, session) => {
 
 document.getElementById('loginForm').addEventListener('submit', async (e) => {
     e.preventDefault();
-    const email = document.getElementById('loginEmail').value;
+    const email = document.getElementById('loginEmail').value.trim();
     const password = document.getElementById('loginPassword').value;
     try {
-        const { error } = await sb.auth.signInWithPassword({ email, password });
+        const { data, error } = await sb.auth.signInWithPassword({ email, password });
         if (error) throw error;
+        if (!data.session) {
+            showAlert(
+                'loginAlert',
+                'لم تُنشأ جلسة — غالباً البريد غير مؤكد. راجع البريد أو عطّل تأكيد البريد من لوحة Supabase.',
+                'error'
+            );
+            return;
+        }
         showAlert('loginAlert', 'تم تسجيل الدخول بنجاح', 'success');
     } catch (error) {
-        showAlert('loginAlert', 'خطأ في تسجيل الدخول: ' + error.message, 'error');
+        showAlert('loginAlert', 'خطأ في تسجيل الدخول: ' + formatAuthError(error, 'signIn'), 'error');
     }
 });
 
@@ -192,7 +217,7 @@ document.getElementById('registerForm').addEventListener('submit', async (e) => 
         );
         setTimeout(() => showLogin(), 2000);
     } catch (error) {
-        showAlert('registerAlert', 'خطأ في إنشاء الحساب: ' + error.message, 'error');
+        showAlert('registerAlert', 'خطأ في إنشاء الحساب: ' + formatAuthError(error, 'signUp'), 'error');
     }
 });
 
