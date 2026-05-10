@@ -36,6 +36,8 @@
             display: flex;
             justify-content: space-between;
             align-items: center;
+            flex-wrap: wrap;
+            gap: 16px;
         }
 
         .header h1 {
@@ -783,6 +785,10 @@
         <div class="container">
             <div class="header">
                 <h1><i class="fas fa-archive"></i> نظام الأرشيف الإلكتروني</h1>
+                <div id="companySwitcherWrap" style="display:none; align-items:center; gap:10px; flex-wrap:wrap; margin:0 12px;">
+                    <label for="companySwitcher" style="font-size:14px; white-space:nowrap; opacity:0.95;"><i class="fas fa-building"></i> الشركة النشطة</label>
+                    <select id="companySwitcher" style="padding:8px 12px; border-radius:8px; border:2px solid rgba(255,255,255,0.45); background:rgba(255,255,255,0.95); color:#333; min-width:200px; max-width:280px; font-size:14px;"></select>
+                </div>
                 <div class="user-info">
                     <span id="userName"></span>
                     <button onclick="logout()" class="btn btn-danger"><i class="fas fa-sign-out-alt"></i> تسجيل الخروج</button>

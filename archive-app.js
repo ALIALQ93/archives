@@ -47,6 +47,12 @@ document.addEventListener('DOMContentLoaded', function () {
 
 let currentUser = null;
 let companyId = null;
+/** شركة المستخدم من profiles.company_id */
+let profileCompanyId = null;
+/** سوبر أدمن: الشركة المعروضة حالياً */
+let actingCompanyId = null;
+let isSuperAdmin = false;
+let companiesList = [];
 let currentEditingId = null;
 let sections = [];
 let cards = [];
@@ -134,15 +140,17 @@ async function byteaToDataUrl(mime, content) {
     });
 }
 
-function showAlert(elementId, message, type) {
+function showAlert(elementId, message, type, durationMs) {
     const alertDiv = document.getElementById(elementId);
     if (!alertDiv) return;
     alertDiv.className = `alert alert-${type}`;
     alertDiv.textContent = message;
+    const ms = durationMs !== undefined ? durationMs : 8000;
+    if (ms <= 0) return;
     setTimeout(() => {
         alertDiv.textContent = '';
         alertDiv.className = '';
-    }, 5000);
+    }, ms);
 }
 
 /** ترجمة أخطاء المصادقة الشائعة + إظهار التفاصيل في وحدة التحكم */
@@ -162,30 +170,129 @@ function formatAuthError(error, context) {
     return msg + (error && error.status ? ` (رمز HTTP: ${error.status})` : '');
 }
 
+function getActiveCompanyId() {
+    if (isSuperAdmin && actingCompanyId) return actingCompanyId;
+    return profileCompanyId;
+}
+
+function refreshActiveCompanyId() {
+    companyId = getActiveCompanyId();
+}
+
+async function initCompanyContext() {
+    const wrap = document.getElementById('companySwitcherWrap');
+    const sel = document.getElementById('companySwitcher');
+    if (!wrap || !sel) return;
+
+    if (isSuperAdmin) {
+        const { data: allCo, error } = await sb.from('companies').select('id, name').order('name');
+        if (error) console.error(error);
+        companiesList = allCo || [];
+
+        const stored = sessionStorage.getItem('archive_acting_company_id');
+        if (stored && companiesList.some((c) => c.id === stored)) {
+            actingCompanyId = stored;
+        } else if (companiesList.some((c) => c.id === profileCompanyId)) {
+            actingCompanyId = profileCompanyId;
+            sessionStorage.setItem('archive_acting_company_id', actingCompanyId);
+        } else if (companiesList.length > 0) {
+            actingCompanyId = companiesList[0].id;
+            sessionStorage.setItem('archive_acting_company_id', actingCompanyId);
+        } else {
+            actingCompanyId = profileCompanyId;
+        }
+
+        wrap.style.display = 'flex';
+        sel.innerHTML = companiesList
+            .map((c) => {
+                const label = c.name && String(c.name).trim() ? c.name : c.id;
+                return `<option value="${c.id}">${escapeHtml(label)}</option>`;
+            })
+            .join('');
+        if (actingCompanyId) sel.value = actingCompanyId;
+        sel.onchange = onCompanySwitch;
+    } else {
+        actingCompanyId = null;
+        wrap.style.display = 'none';
+        sel.innerHTML = '';
+        sel.onchange = null;
+    }
+    refreshActiveCompanyId();
+}
+
+function onCompanySwitch() {
+    const sel = document.getElementById('companySwitcher');
+    if (!sel || !isSuperAdmin) return;
+    actingCompanyId = sel.value || null;
+    if (actingCompanyId) sessionStorage.setItem('archive_acting_company_id', actingCompanyId);
+    refreshActiveCompanyId();
+    sections = [];
+    cards = [];
+    users = [];
+    teardownAllRealtime();
+    loadDashboard();
+    const activeTab = document.querySelector('.tab-content.active');
+    const tid = activeTab && activeTab.id;
+    if (tid === 'sections') loadSections();
+    else if (tid === 'cards') loadCards();
+    else if (tid === 'users') loadUsers();
+    else if (tid === 'settings') loadSettings();
+}
+
 sb.auth.onAuthStateChange(async (_event, session) => {
     if (session?.user) {
         currentUser = session.user;
         const { data: prof, error } = await sb
             .from('profiles')
-            .select('company_id')
+            .select('company_id, is_super_admin, full_name')
             .eq('id', session.user.id)
             .maybeSingle();
+
         if (error || !prof?.company_id) {
-            console.error('لم يُعثر على ملف المستخدم:', error);
+            console.error('ملف المستخدم (profiles) غير متاح:', error || prof);
+
+            let msg;
+            if (error) {
+                msg =
+                    'لا يمكن قراءة جدول profiles (خطأ من الخادم). تحقق من سياسات RLS أو من تنفيذ ملف الهجرة SQL. التفاصيل: ' +
+                    (error.message || JSON.stringify(error));
+            } else {
+                msg =
+                    'تم التحقق من البريد وكلمة المرور، لكن لا يوجد لك سجل في جدول profiles. غالباً لم تُنفَّذ هجرة قاعدة البيانات أو المحفّز handle_new_user. افتح Supabase → SQL Editor وشغّل محتوى ملف supabase/migrations/... ثم جرّب الدخول مجدداً، أو أنشئ حساباً جديداً من «إنشاء حساب جديد».';
+            }
+
+            document.getElementById('loginScreen').style.display = 'block';
+            document.getElementById('registerScreen').style.display = 'none';
+            document.getElementById('app').style.display = 'none';
+            showAlert('loginAlert', msg, 'error', 45000);
+
             await sb.auth.signOut();
             return;
         }
-        companyId = prof.company_id;
+
+        profileCompanyId = prof.company_id;
+        isSuperAdmin = !!prof.is_super_admin;
+        document.getElementById('userName').textContent =
+            (prof.full_name || session.user.email || '') + (isSuperAdmin ? ' (سوبر أدمن)' : '');
+
+        await initCompanyContext();
+
         document.getElementById('loginScreen').style.display = 'none';
         document.getElementById('registerScreen').style.display = 'none';
         document.getElementById('app').style.display = 'block';
-        loadUserData();
         loadDashboard();
     } else {
         currentUser = null;
+        profileCompanyId = null;
+        actingCompanyId = null;
+        isSuperAdmin = false;
+        companiesList = [];
         companyId = null;
         teardownAllRealtime();
         stopDashboardPolling();
+        const wrap = document.getElementById('companySwitcherWrap');
+        if (wrap) wrap.style.display = 'none';
+        sessionStorage.removeItem('archive_acting_company_id');
         document.getElementById('loginScreen').style.display = 'block';
         document.getElementById('app').style.display = 'none';
     }
@@ -202,11 +309,12 @@ document.getElementById('loginForm').addEventListener('submit', async (e) => {
             showAlert(
                 'loginAlert',
                 'لم تُنشأ جلسة — غالباً البريد غير مؤكد. راجع البريد أو عطّل تأكيد البريد من لوحة Supabase.',
-                'error'
+                'error',
+                15000
             );
             return;
         }
-        showAlert('loginAlert', 'تم تسجيل الدخول بنجاح', 'success');
+        showAlert('loginAlert', 'جاري التحقق من الحساب…', 'success', 4000);
     } catch (error) {
         showAlert('loginAlert', 'خطأ في تسجيل الدخول: ' + formatAuthError(error, 'signIn'), 'error');
     }
@@ -260,11 +368,14 @@ async function loadUserData() {
     if (!currentUser) return;
     const { data } = await sb
         .from('profiles')
-        .select('full_name')
+        .select('full_name, is_super_admin')
         .eq('id', currentUser.id)
         .maybeSingle();
+    if (data && typeof data.is_super_admin === 'boolean') {
+        isSuperAdmin = !!data.is_super_admin;
+    }
     document.getElementById('userName').textContent =
-        data?.full_name || currentUser.email || '';
+        (data?.full_name || currentUser.email || '') + (isSuperAdmin ? ' (سوبر أدمن)' : '');
 }
 
 function switchTab(tabName, event) {
