@@ -1,0 +1,8 @@
+{
+  "name": "archives-albab",
+  "private": true,
+  "description": "نظام الأرشيف — شغّل عبر npm run serve وافتح http://localhost:3000 (لا تستخدم file://)",
+  "scripts": {
+    "serve": "npx --yes serve . -l 3000 --cors"
+  }
+}
