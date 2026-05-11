@@ -6,16 +6,26 @@
  * في المتصفح لا يوجد process.env — إما هذا الملف أو أداة بناء (Vite) لحقن المتغيرات.
  *
  * أنشئ الجداول بتشغيل الهجرة في supabase/migrations أو من SQL Editor.
+ *
+ * الأولوية: window.ARCHIVE_SUPABASE من config.js ثم وسوم meta في index.html
+ * (مناسب لـ GitHub Pages حيث قد لا يُرفع config.js).
  */
+
+function readArchiveMeta(name) {
+    if (typeof document === 'undefined') return '';
+    const el = document.querySelector(`meta[name="${name}"]`);
+    const v = el && el.getAttribute('content');
+    return v && String(v).trim() ? String(v).trim() : '';
+}
 
 const CFG =
     typeof window !== 'undefined' && window.ARCHIVE_SUPABASE ? window.ARCHIVE_SUPABASE : {};
-const SUPABASE_URL = CFG.url || '';
-const SUPABASE_ANON_KEY = CFG.anonKey || '';
+const SUPABASE_URL = CFG.url || readArchiveMeta('archive-supabase-url');
+const SUPABASE_ANON_KEY = CFG.anonKey || readArchiveMeta('archive-supabase-anon-key');
 
 if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
     console.error(
-        '[الأرشيف] أنشئ ملف config.js بجانب index.html (انسخ من config.example.js) وضع url و anonKey من Settings → API'
+        '[الأرشيف] أضف meta archive-supabase-url و archive-supabase-anon-key أو ملف config.js'
     );
 }
 
@@ -40,7 +50,7 @@ document.addEventListener('DOMContentLoaded', function () {
         m.style.cssText =
             'background:#fff3e0;border-bottom:2px solid #ff9800;color:#e65100;padding:14px 20px;font-size:14px;text-align:center;line-height:1.6;';
         m.innerHTML =
-            '<strong>إعداد Supabase ناقص:</strong> أنشئ ملف <code>config.js</code> من نسخة <code>config.example.js</code> واملأ <code>url</code> و <code>anonKey</code> من لوحة المشروع → Settings → API.';
+            '<strong>إعداد Supabase ناقص:</strong> أضف وسوم meta في <code>index.html</code> أو ملف <code>config.js</code> — راجع لوحة المشروع → Settings → API.';
         document.body.insertBefore(m, document.body.firstChild);
     }
 });
@@ -244,7 +254,7 @@ sb.auth.onAuthStateChange(async (_event, session) => {
         currentUser = session.user;
         const { data: prof, error } = await sb
             .from('profiles')
-            .select('company_id, is_super_admin, full_name')
+            .select('company_id, is_super_admin, full_name, role')
             .eq('id', session.user.id)
             .maybeSingle();
 
@@ -271,7 +281,7 @@ sb.auth.onAuthStateChange(async (_event, session) => {
         }
 
         profileCompanyId = prof.company_id;
-        isSuperAdmin = !!prof.is_super_admin;
+        isSuperAdmin = profileIsSuperAdmin(prof);
         document.getElementById('userName').textContent =
             (prof.full_name || session.user.email || '') + (isSuperAdmin ? ' (سوبر أدمن)' : '');
 
@@ -364,15 +374,26 @@ function showRegister() {
     document.getElementById('registerScreen').style.display = 'block';
 }
 
+/** سوبر أدمن: عمود is_super_admin أو role = super_admin (كما في الجدول) */
+function profileIsSuperAdmin(prof) {
+    if (!prof) return false;
+    if (prof.is_super_admin === true) return true;
+    const r = String(prof.role || '')
+        .toLowerCase()
+        .trim()
+        .replace(/\s+/g, '_');
+    return r === 'super_admin';
+}
+
 async function loadUserData() {
     if (!currentUser) return;
     const { data } = await sb
         .from('profiles')
-        .select('full_name, is_super_admin')
+        .select('full_name, is_super_admin, role')
         .eq('id', currentUser.id)
         .maybeSingle();
-    if (data && typeof data.is_super_admin === 'boolean') {
-        isSuperAdmin = !!data.is_super_admin;
+    if (data) {
+        isSuperAdmin = profileIsSuperAdmin(data);
     }
     document.getElementById('userName').textContent =
         (data?.full_name || currentUser.email || '') + (isSuperAdmin ? ' (سوبر أدمن)' : '');
