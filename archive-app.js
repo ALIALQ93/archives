@@ -200,7 +200,9 @@ const VALID_ROLES = ['admin', 'user', 'viewer'];
 function normalizeRole(role) {
     const r = String(role || 'user')
         .toLowerCase()
-        .trim();
+        .trim()
+        .replace(/\s+/g, '_');
+    if (r === 'super_admin' || r === 'سوبر_أدمن') return 'admin';
     return VALID_ROLES.includes(r) ? r : 'user';
 }
 
@@ -238,7 +240,7 @@ async function inviteUserByAdmin({ email, password, fullName, role, phone }) {
 }
 
 function userRole() {
-    return (currentProfile && currentProfile.role) || '';
+    return normalizeRole(currentProfile && currentProfile.role);
 }
 
 function isAdmin() {
@@ -300,27 +302,38 @@ sb.auth.onAuthStateChange(async (_event, session) => {
 
         if (error || !prof) {
             console.error('ملف المستخدم (profiles) غير متاح:', error || prof);
+            console.warn(
+                '[إصلاح الدخول] معرف حساب المصادقة auth.uid:',
+                session.user.id,
+                '| البريد:',
+                session.user.email,
+                '\nيجب أن يكون عمود profiles.id مساوياً لهذا المعرف تماماً.'
+            );
 
             let msg;
             if (error) {
                 msg =
-                    'لا يمكن قراءة جدول profiles. تحقق من تنفيذ هجرة SQL الأخيرة (single_organization). التفاصيل: ' +
+                    'لا يمكن قراءة جدول profiles (خطأ من الخادم). إن ظهر «permission denied» فجرّب تشغيل ملف إصلاح الصلاحيات في مجلد supabase/sql من لوحة SQL.\nالتفاصيل: ' +
                     (error.message || JSON.stringify(error));
             } else {
                 msg =
-                    'لا يوجد ملف مستخدم مرتبط بحسابك. نفّذ هجرة supabase/migrations/20260517120000_single_organization.sql من SQL Editor، أو اطلب من المدير إضافتك.';
+                    'تم الدخول بنجاح، لكن لا يوجد صف في جدول profiles يطابق هذا الحساب.\n' +
+                    'غالباً تم ضبط صلاحية admin على صف قديم أو معرف مختلف.\n' +
+                    'افتح وحدة التحكم (F12) وانسخ «معرف حساب المصادقة» ثم في Supabase → SQL Editor شغّل الإصلاح من الملف:\n' +
+                    'supabase/sql/repair_login_profile.sql\n' +
+                    '(أو أنشئ صفاً في profiles حيث id = ذلك المعرف و role = admin).';
             }
 
             document.getElementById('loginScreen').style.display = 'block';
             document.getElementById('registerScreen').style.display = 'none';
             document.getElementById('app').style.display = 'none';
-            showAlert('loginAlert', msg, 'error', 45000);
+            showAlert('loginAlert', msg, 'error', 60000);
 
             await sb.auth.signOut();
             return;
         }
 
-        currentProfile = prof;
+        currentProfile = { ...prof, role: normalizeRole(prof.role) };
         const name = prof.full_name || session.user.email || '';
         document.getElementById('userName').textContent =
             name + ' — ' + roleLabel(prof.role);
