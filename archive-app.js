@@ -1483,6 +1483,12 @@ function openUserModal(id = null) {
 function closeUserModal() {
     document.getElementById('userModal').classList.remove('active');
     currentEditingId = null;
+    const emailInput = document.getElementById('userEmail');
+    const roleSelect = document.getElementById('userRole');
+    const pwdInput = document.getElementById('userPassword');
+    if (emailInput) emailInput.readOnly = false;
+    if (roleSelect) roleSelect.disabled = false;
+    if (pwdInput) pwdInput.required = false;
 }
 
 document.getElementById('userModal').addEventListener('click', (e) => {
