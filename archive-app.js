@@ -174,7 +174,67 @@ function formatAuthError(error, context) {
     if (lower.includes('signup') && lower.includes('disabled')) {
         return 'تسجيل الدخول بالبريد معطّل في المشروع: Authentication → Providers → Email.';
     }
+    if (lower.includes('public_registration_closed')) {
+        return 'التسجيل العام مغلق. اطلب من المدير إنشاء حساب لك.';
+    }
+    if (lower.includes('user already registered') || lower.includes('already been registered')) {
+        return 'هذا البريد مسجّل مسبقاً.';
+    }
     return msg + (error && error.status ? ` (رمز HTTP: ${error.status})` : '');
+}
+
+function formatUserMgmtError(err) {
+    const msg = (err && err.message) || String(err);
+    const lower = msg.toLowerCase();
+    if (lower.includes('public_registration_closed')) {
+        return 'لا يمكن إنشاء المستخدم: التسجيل مغلق ولم يُرسل طلب دعوة من المدير.';
+    }
+    if (lower.includes('duplicate') || lower.includes('already')) {
+        return 'البريد الإلكتروني مستخدم مسبقاً.';
+    }
+    return formatAuthError(err, 'userMgmt');
+}
+
+const VALID_ROLES = ['admin', 'user', 'viewer'];
+
+function normalizeRole(role) {
+    const r = String(role || 'user')
+        .toLowerCase()
+        .trim();
+    return VALID_ROLES.includes(r) ? r : 'user';
+}
+
+/** إنشاء مستخدم من المدير عبر REST دون تبديل جلسة المدير الحالية */
+async function inviteUserByAdmin({ email, password, fullName, role, phone }) {
+    const res = await fetch(`${SUPABASE_URL}/auth/v1/signup`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            apikey: SUPABASE_ANON_KEY,
+            Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+        },
+        body: JSON.stringify({
+            email,
+            password,
+            data: {
+                full_name: fullName,
+                invited_by_admin: 'true',
+                role: normalizeRole(role),
+                phone: phone || '',
+            },
+        }),
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) {
+        const errMsg =
+            json.error_description ||
+            json.msg ||
+            json.message ||
+            json.error ||
+            'فشل إنشاء المستخدم';
+        throw new Error(errMsg);
+    }
+    return json;
 }
 
 function userRole() {
@@ -219,7 +279,12 @@ function applyRoleUI() {
 
 async function checkRegistrationOpen() {
     const { data, error } = await sb.rpc('registration_open');
-    registrationOpen = !error && data === true;
+    if (error) {
+        console.warn('[registration_open]', error);
+        registrationOpen = false;
+    } else {
+        registrationOpen = data === true;
+    }
     const registerBtn = document.getElementById('registerLinkBtn');
     if (registerBtn) registerBtn.style.display = registrationOpen ? '' : 'none';
 }
@@ -1379,16 +1444,39 @@ function renderUsers(usersToRender = null) {
 
 function openUserModal(id = null) {
     currentEditingId = id;
-    document.getElementById('userModalTitle').textContent = id ? 'تعديل المستخدم' : 'إضافة مستخدم جديد';
-    if (id) {
+    const isEdit = Boolean(id);
+    const emailInput = document.getElementById('userEmail');
+    const pwdInput = document.getElementById('userPassword');
+    const pwdHint = document.getElementById('userPasswordHint');
+    const roleSelect = document.getElementById('userRole');
+
+    document.getElementById('userModalTitle').textContent = isEdit
+        ? 'تعديل المستخدم'
+        : 'إضافة مستخدم جديد';
+
+    if (isEdit) {
         const user = users.find((u) => u.id === id);
-        document.getElementById('userFullName').value = user.fullName || '';
-        document.getElementById('userEmail').value = user.email || '';
-        document.getElementById('userRole').value = user.role || 'user';
-        document.getElementById('userPhone').value = user.phone || '';
+        document.getElementById('userFullName').value = user?.fullName || '';
+        emailInput.value = user?.email || '';
+        emailInput.readOnly = true;
+        pwdInput.value = '';
+        pwdInput.required = false;
+        if (pwdHint) pwdHint.textContent = 'تغيير كلمة المرور: من لوحة Supabase أو رابط «نسيت كلمة المرور».';
+        roleSelect.value = normalizeRole(user?.role);
+        document.getElementById('userPhone').value = user?.phone || '';
+        if (id === currentUser?.id) {
+            roleSelect.disabled = true;
+        } else {
+            roleSelect.disabled = false;
+        }
     } else {
         document.getElementById('userForm').reset();
+        emailInput.readOnly = false;
+        pwdInput.required = true;
+        if (pwdHint) pwdHint.textContent = 'مطلوبة للمستخدم الجديد (6 أحرف على الأقل).';
+        roleSelect.disabled = false;
     }
+
     document.getElementById('userModal').classList.add('active');
 }
 
@@ -1408,14 +1496,27 @@ document.getElementById('userForm').addEventListener('submit', async (e) => {
         return;
     }
 
-    const fullName = document.getElementById('userFullName').value;
-    const email = document.getElementById('userEmail').value;
+    const fullName = document.getElementById('userFullName').value.trim();
+    const email = document.getElementById('userEmail').value.trim().toLowerCase();
     const password = document.getElementById('userPassword').value;
-    const role = document.getElementById('userRole').value;
-    const phone = document.getElementById('userPhone').value;
+    const role = normalizeRole(document.getElementById('userRole').value);
+    const phone = document.getElementById('userPhone').value.trim();
+
+    if (!fullName) {
+        alert('أدخل الاسم الكامل.');
+        return;
+    }
+    if (!email) {
+        alert('أدخل البريد الإلكتروني.');
+        return;
+    }
 
     try {
         if (currentEditingId) {
+            if (currentEditingId === currentUser?.id && role !== 'admin') {
+                alert('لا يمكنك إزالة صلاحية المدير عن حسابك.');
+                return;
+            }
             const { error } = await sb
                 .from('profiles')
                 .update({
@@ -1427,42 +1528,23 @@ document.getElementById('userForm').addEventListener('submit', async (e) => {
                 })
                 .eq('id', currentEditingId);
             if (error) throw error;
-            if (password) {
-                alert('تغيير كلمة المرور للمستخدم يتم من لوحة Supabase أو عبر رابط استعادة كلمة المرور.');
-            }
+            alert('تم تحديث بيانات المستخدم.');
         } else {
-            if (!password) {
-                alert('يجب إدخال كلمة مرور للمستخدم الجديد');
+            if (!password || password.length < 6) {
+                alert('كلمة المرور مطلوبة (6 أحرف على الأقل).');
                 return;
             }
-            const res = await fetch(`${SUPABASE_URL}/auth/v1/signup`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    apikey: SUPABASE_ANON_KEY,
-                    Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
-                },
-                body: JSON.stringify({
-                    email,
-                    password,
-                    data: {
-                        full_name: fullName,
-                        invited_by_admin: true,
-                        role,
-                        phone,
-                    },
-                }),
-            });
-            const json = await res.json();
-            if (!res.ok) {
-                throw new Error(json.error_description || json.msg || json.message || 'فشل إنشاء المستخدم');
-            }
+            await inviteUserByAdmin({ email, password, fullName, role, phone });
+            alert(
+                'تم إنشاء الحساب وربطه بجدول profiles.\n' +
+                    'إن كان تأكيد البريد مفعّلاً في Supabase، يجب على المستخدم تأكيد بريده قبل أول دخول.'
+            );
         }
         closeUserModal();
         await fetchUsersData();
         refreshDashboardStats();
     } catch (error) {
-        alert('خطأ: ' + error.message);
+        alert('خطأ: ' + formatUserMgmtError(error));
     }
 });
 
