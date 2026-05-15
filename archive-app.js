@@ -44,6 +44,7 @@ const sb = _create(SUPABASE_URL, SUPABASE_ANON_KEY, {
 });
 
 document.addEventListener('DOMContentLoaded', function () {
+    checkRegistrationOpen();
     if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
         var m = document.createElement('div');
         m.setAttribute('dir', 'rtl');
@@ -56,13 +57,9 @@ document.addEventListener('DOMContentLoaded', function () {
 });
 
 let currentUser = null;
-let companyId = null;
-/** شركة المستخدم من profiles.company_id */
-let profileCompanyId = null;
-/** سوبر أدمن: الشركة المعروضة حالياً */
-let actingCompanyId = null;
-let isSuperAdmin = false;
-let companiesList = [];
+/** ملف المستخدم الحالي من profiles */
+let currentProfile = null;
+let registrationOpen = false;
 let currentEditingId = null;
 let sections = [];
 let cards = [];
@@ -180,73 +177,51 @@ function formatAuthError(error, context) {
     return msg + (error && error.status ? ` (رمز HTTP: ${error.status})` : '');
 }
 
-function getActiveCompanyId() {
-    if (isSuperAdmin && actingCompanyId) return actingCompanyId;
-    return profileCompanyId;
+function userRole() {
+    return (currentProfile && currentProfile.role) || '';
 }
 
-function refreshActiveCompanyId() {
-    companyId = getActiveCompanyId();
+function isAdmin() {
+    return userRole() === 'admin';
 }
 
-async function initCompanyContext() {
-    const wrap = document.getElementById('companySwitcherWrap');
-    const sel = document.getElementById('companySwitcher');
-    if (!wrap || !sel) return;
+function canWriteArchive() {
+    const r = userRole();
+    return r === 'admin' || r === 'user';
+}
 
-    if (isSuperAdmin) {
-        const { data: allCo, error } = await sb.from('companies').select('id, name').order('name');
-        if (error) console.error(error);
-        companiesList = allCo || [];
+function roleLabel(role) {
+    const labels = { admin: 'مدير', user: 'مستخدم', viewer: 'مشاهد' };
+    return labels[role] || role;
+}
 
-        const stored = sessionStorage.getItem('archive_acting_company_id');
-        if (stored && companiesList.some((c) => c.id === stored)) {
-            actingCompanyId = stored;
-        } else if (companiesList.some((c) => c.id === profileCompanyId)) {
-            actingCompanyId = profileCompanyId;
-            sessionStorage.setItem('archive_acting_company_id', actingCompanyId);
-        } else if (companiesList.length > 0) {
-            actingCompanyId = companiesList[0].id;
-            sessionStorage.setItem('archive_acting_company_id', actingCompanyId);
-        } else {
-            actingCompanyId = profileCompanyId;
-        }
+function applyRoleUI() {
+    const write = canWriteArchive();
+    const admin = isAdmin();
 
-        wrap.style.display = 'flex';
-        sel.innerHTML = companiesList
-            .map((c) => {
-                const label = c.name && String(c.name).trim() ? c.name : c.id;
-                return `<option value="${c.id}">${escapeHtml(label)}</option>`;
-            })
-            .join('');
-        if (actingCompanyId) sel.value = actingCompanyId;
-        sel.onchange = onCompanySwitch;
-    } else {
-        actingCompanyId = null;
-        wrap.style.display = 'none';
-        sel.innerHTML = '';
-        sel.onchange = null;
+    document.querySelectorAll('[data-requires-write]').forEach((el) => {
+        el.style.display = write ? '' : 'none';
+    });
+    document.querySelectorAll('[data-requires-admin]').forEach((el) => {
+        el.style.display = admin ? '' : 'none';
+    });
+
+    const usersTab = document.querySelector('.tab[data-tab="users"]');
+    if (usersTab) usersTab.style.display = admin ? '' : 'none';
+
+    const settingsForm = document.getElementById('settingsForm');
+    if (settingsForm) {
+        settingsForm.querySelectorAll('input, textarea, button').forEach((el) => {
+            el.disabled = !admin;
+        });
     }
-    refreshActiveCompanyId();
 }
 
-function onCompanySwitch() {
-    const sel = document.getElementById('companySwitcher');
-    if (!sel || !isSuperAdmin) return;
-    actingCompanyId = sel.value || null;
-    if (actingCompanyId) sessionStorage.setItem('archive_acting_company_id', actingCompanyId);
-    refreshActiveCompanyId();
-    sections = [];
-    cards = [];
-    users = [];
-    teardownAllRealtime();
-    loadDashboard();
-    const activeTab = document.querySelector('.tab-content.active');
-    const tid = activeTab && activeTab.id;
-    if (tid === 'sections') loadSections();
-    else if (tid === 'cards') loadCards();
-    else if (tid === 'users') loadUsers();
-    else if (tid === 'settings') loadSettings();
+async function checkRegistrationOpen() {
+    const { data, error } = await sb.rpc('registration_open');
+    registrationOpen = !error && data === true;
+    const registerBtn = document.getElementById('registerLinkBtn');
+    if (registerBtn) registerBtn.style.display = registrationOpen ? '' : 'none';
 }
 
 sb.auth.onAuthStateChange(async (_event, session) => {
@@ -254,21 +229,21 @@ sb.auth.onAuthStateChange(async (_event, session) => {
         currentUser = session.user;
         const { data: prof, error } = await sb
             .from('profiles')
-            .select('company_id, is_super_admin, full_name, role')
+            .select('full_name, role, phone, email')
             .eq('id', session.user.id)
             .maybeSingle();
 
-        if (error || !prof?.company_id) {
+        if (error || !prof) {
             console.error('ملف المستخدم (profiles) غير متاح:', error || prof);
 
             let msg;
             if (error) {
                 msg =
-                    'لا يمكن قراءة جدول profiles (خطأ من الخادم). تحقق من سياسات RLS أو من تنفيذ ملف الهجرة SQL. التفاصيل: ' +
+                    'لا يمكن قراءة جدول profiles. تحقق من تنفيذ هجرة SQL الأخيرة (single_organization). التفاصيل: ' +
                     (error.message || JSON.stringify(error));
             } else {
                 msg =
-                    'تم التحقق من البريد وكلمة المرور، لكن لا يوجد لك سجل في جدول profiles. غالباً لم تُنفَّذ هجرة قاعدة البيانات أو المحفّز handle_new_user. افتح Supabase → SQL Editor وشغّل محتوى ملف supabase/migrations/... ثم جرّب الدخول مجدداً، أو أنشئ حساباً جديداً من «إنشاء حساب جديد».';
+                    'لا يوجد ملف مستخدم مرتبط بحسابك. نفّذ هجرة supabase/migrations/20260517120000_single_organization.sql من SQL Editor، أو اطلب من المدير إضافتك.';
             }
 
             document.getElementById('loginScreen').style.display = 'block';
@@ -280,12 +255,12 @@ sb.auth.onAuthStateChange(async (_event, session) => {
             return;
         }
 
-        profileCompanyId = prof.company_id;
-        isSuperAdmin = profileIsSuperAdmin(prof);
+        currentProfile = prof;
+        const name = prof.full_name || session.user.email || '';
         document.getElementById('userName').textContent =
-            (prof.full_name || session.user.email || '') + (isSuperAdmin ? ' (سوبر أدمن)' : '');
+            name + ' — ' + roleLabel(prof.role);
 
-        await initCompanyContext();
+        applyRoleUI();
 
         document.getElementById('loginScreen').style.display = 'none';
         document.getElementById('registerScreen').style.display = 'none';
@@ -293,18 +268,12 @@ sb.auth.onAuthStateChange(async (_event, session) => {
         loadDashboard();
     } else {
         currentUser = null;
-        profileCompanyId = null;
-        actingCompanyId = null;
-        isSuperAdmin = false;
-        companiesList = [];
-        companyId = null;
+        currentProfile = null;
         teardownAllRealtime();
         stopDashboardPolling();
-        const wrap = document.getElementById('companySwitcherWrap');
-        if (wrap) wrap.style.display = 'none';
-        sessionStorage.removeItem('archive_acting_company_id');
         document.getElementById('loginScreen').style.display = 'block';
         document.getElementById('app').style.display = 'none';
+        checkRegistrationOpen();
     }
 });
 
@@ -332,10 +301,17 @@ document.getElementById('loginForm').addEventListener('submit', async (e) => {
 
 document.getElementById('registerForm').addEventListener('submit', async (e) => {
     e.preventDefault();
-    const email = document.getElementById('registerEmail').value;
+    if (!registrationOpen) {
+        showAlert(
+            'registerAlert',
+            'التسجيل العام مغلق. اطلب من مدير النظام إنشاء حساب لك.',
+            'error'
+        );
+        return;
+    }
+    const email = document.getElementById('registerEmail').value.trim();
     const password = document.getElementById('registerPassword').value;
-    const fullName = document.getElementById('fullName').value;
-    const companyName = document.getElementById('companyName').value;
+    const fullName = document.getElementById('fullName').value.trim();
     try {
         const { error } = await sb.auth.signUp({
             email,
@@ -343,20 +319,24 @@ document.getElementById('registerForm').addEventListener('submit', async (e) => 
             options: {
                 data: {
                     full_name: fullName,
-                    company_name: companyName,
-                    role: 'admin',
                 },
             },
         });
         if (error) throw error;
         showAlert(
             'registerAlert',
-            'تم إنشاء الحساب. إن وُجد تأكيد بريد، راجع صندوق الوارد ثم سجّل الدخول.',
+            'تم إنشاء حساب المدير الأول. إن وُجد تأكيد بريد، راجع صندوق الوارد ثم سجّل الدخول.',
             'success'
         );
+        registrationOpen = false;
         setTimeout(() => showLogin(), 2000);
     } catch (error) {
-        showAlert('registerAlert', 'خطأ في إنشاء الحساب: ' + formatAuthError(error, 'signUp'), 'error');
+        const msg = formatAuthError(error, 'signUp');
+        const hint =
+            msg.includes('public_registration_closed') || msg.includes('registration')
+                ? ' يوجد مستخدمون بالفعل — اطلب من المدير إضافتك.'
+                : '';
+        showAlert('registerAlert', 'خطأ في إنشاء الحساب: ' + msg + hint, 'error');
     }
 });
 
@@ -374,32 +354,8 @@ function showRegister() {
     document.getElementById('registerScreen').style.display = 'block';
 }
 
-/** سوبر أدمن: عمود is_super_admin أو role = super_admin (كما في الجدول) */
-function profileIsSuperAdmin(prof) {
-    if (!prof) return false;
-    if (prof.is_super_admin === true) return true;
-    const r = String(prof.role || '')
-        .toLowerCase()
-        .trim()
-        .replace(/\s+/g, '_');
-    return r === 'super_admin';
-}
-
-async function loadUserData() {
-    if (!currentUser) return;
-    const { data } = await sb
-        .from('profiles')
-        .select('full_name, is_super_admin, role')
-        .eq('id', currentUser.id)
-        .maybeSingle();
-    if (data) {
-        isSuperAdmin = profileIsSuperAdmin(data);
-    }
-    document.getElementById('userName').textContent =
-        (data?.full_name || currentUser.email || '') + (isSuperAdmin ? ' (سوبر أدمن)' : '');
-}
-
 function switchTab(tabName, event) {
+    if (tabName === 'users' && !isAdmin()) return;
     document.querySelectorAll('.tab').forEach((tab) => tab.classList.remove('active'));
     document.querySelectorAll('.tab-content').forEach((content) => content.classList.remove('active'));
 
@@ -433,16 +389,10 @@ function switchTab(tabName, event) {
 }
 
 async function refreshDashboardStats() {
-    if (!companyId) return;
-    const { count: secCount } = await sb
-        .from('sections')
-        .select('*', { count: 'exact', head: true })
-        .eq('company_id', companyId);
+    if (!currentProfile) return;
+    const { count: secCount } = await sb.from('sections').select('*', { count: 'exact', head: true });
 
-    const { data: cardRows } = await sb
-        .from('archive_cards')
-        .select('status')
-        .eq('company_id', companyId);
+    const { data: cardRows } = await sb.from('archive_cards').select('status');
 
     let active = 0,
         archived = 0,
@@ -453,10 +403,7 @@ async function refreshDashboardStats() {
         else if (c.status === 'deleted') deleted++;
     });
 
-    const { count: userCount } = await sb
-        .from('profiles')
-        .select('*', { count: 'exact', head: true })
-        .eq('company_id', companyId);
+    const { count: userCount } = await sb.from('profiles').select('*', { count: 'exact', head: true });
 
     document.getElementById('totalSections').textContent = secCount ?? 0;
     document.getElementById('totalCards').textContent = cardRows?.length ?? 0;
@@ -471,19 +418,14 @@ function loadDashboard() {
     stopDashboardPolling();
     refreshDashboardStats();
 
-    if (!companyId) return;
+    if (!currentProfile) return;
 
     const subscribe = (table) => {
         const ch = sb
-            .channel(`dash-${table}-${companyId}`)
+            .channel(`dash-${table}`)
             .on(
                 'postgres_changes',
-                {
-                    event: '*',
-                    schema: 'public',
-                    table,
-                    filter: `company_id=eq.${companyId}`,
-                },
+                { event: '*', schema: 'public', table },
                 () => refreshDashboardStats()
             )
             .subscribe();
@@ -493,27 +435,14 @@ function loadDashboard() {
     try {
         subscribe('sections');
         subscribe('archive_cards');
-        const chUsers = sb
-            .channel(`dash-prof-${companyId}`)
-            .on(
-                'postgres_changes',
-                {
-                    event: '*',
-                    schema: 'public',
-                    table: 'profiles',
-                    filter: `company_id=eq.${companyId}`,
-                },
-                () => refreshDashboardStats()
-            )
-            .subscribe();
-        dashboardChannels.push(chUsers);
+        subscribe('profiles');
     } catch (_) {}
 
     dashboardInterval = setInterval(refreshDashboardStats, 12000);
 }
 
 async function exportData() {
-    if (!companyId) return;
+    if (!currentProfile) return;
     const exportPayload = {
         sections: [],
         cards: [],
@@ -524,14 +453,13 @@ async function exportData() {
     try {
         const [{ data: secData, error: e1 }, { data: cardData, error: e2 }, { data: userData, error: e3 }] =
             await Promise.all([
-                sb.from('sections').select('*').eq('company_id', companyId).order('sort_order'),
+                sb.from('sections').select('*').order('sort_order'),
                 sb
                     .from('archive_cards')
                     .select(
                         '*, card_attachments ( id, file_name, mime_type, size_bytes, uploaded_at )'
-                    )
-                    .eq('company_id', companyId),
-                sb.from('profiles').select('*').eq('company_id', companyId),
+                    ),
+                sb.from('profiles').select('*'),
             ]);
         if (e1) throw e1;
         if (e2) throw e2;
@@ -612,7 +540,7 @@ function mapCardRow(c) {
 }
 
 function loadSections() {
-    if (!companyId) return;
+    if (!currentProfile) return;
     if (sectionChannel) {
         try {
             sb.removeChannel(sectionChannel);
@@ -621,15 +549,10 @@ function loadSections() {
     }
 
     sectionChannel = sb
-        .channel(`sections-live-${companyId}`)
+        .channel('sections-live')
         .on(
             'postgres_changes',
-            {
-                event: '*',
-                schema: 'public',
-                table: 'sections',
-                filter: `company_id=eq.${companyId}`,
-            },
+            { event: '*', schema: 'public', table: 'sections' },
             () => fetchSectionsData()
         )
         .subscribe();
@@ -638,12 +561,8 @@ function loadSections() {
 }
 
 async function fetchSectionsData() {
-    if (!companyId) return;
-    const { data, error } = await sb
-        .from('sections')
-        .select('*')
-        .eq('company_id', companyId)
-        .order('sort_order', { ascending: true });
+    if (!currentProfile) return;
+    const { data, error } = await sb.from('sections').select('*').order('sort_order', { ascending: true });
     if (error) {
         console.error(error);
         return;
@@ -680,17 +599,23 @@ function renderSections(sectionsToRender = null) {
         tableHTML += `
             <tr>
                 <td>${index + 1}</td>
-                <td><strong>${section.name}</strong></td>
-                <td>${section.description || 'لا يوجد وصف'}</td>
+                <td><strong>${escapeHtml(section.name || '')}</strong></td>
+                <td>${escapeHtml(section.description || 'لا يوجد وصف')}</td>
                 <td>${section.order || 0}</td>
                 <td>
                     <div class="table-actions">
+                        ${
+                            canWriteArchive()
+                                ? `
                         <button onclick="editSection('${section.id}')" class="btn btn-secondary">
                             <i class="fas fa-edit"></i> تعديل
                         </button>
                         <button onclick="deleteSection('${section.id}')" class="btn btn-danger">
                             <i class="fas fa-trash"></i> حذف
                         </button>
+                        `
+                                : '<span style="color:#999;">عرض فقط</span>'
+                        }
                     </div>
                 </td>
             </tr>
@@ -730,9 +655,11 @@ document.getElementById('sectionModal').addEventListener('click', (e) => {
 
 document.getElementById('sectionForm').addEventListener('submit', async (e) => {
     e.preventDefault();
-    if (!companyId) return;
+    if (!canWriteArchive()) {
+        alert('ليس لديك صلاحية التعديل.');
+        return;
+    }
     const row = {
-        company_id: companyId,
         name: document.getElementById('sectionName').value,
         description: document.getElementById('sectionDescription').value,
         sort_order: parseInt(document.getElementById('sectionOrder').value, 10) || 0,
@@ -741,7 +668,7 @@ document.getElementById('sectionForm').addEventListener('submit', async (e) => {
 
     try {
         if (currentEditingId) {
-            await sb.from('sections').update(row).eq('id', currentEditingId).eq('company_id', companyId);
+            await sb.from('sections').update(row).eq('id', currentEditingId);
         } else {
             row.created_at = new Date().toISOString();
             await sb.from('sections').insert(row);
@@ -759,10 +686,13 @@ function editSection(id) {
 }
 
 async function deleteSection(id) {
+    if (!canWriteArchive()) {
+        alert('ليس لديك صلاحية الحذف.');
+        return;
+    }
     if (!confirm('هل أنت متأكد من حذف هذا القسم؟')) return;
-    if (!companyId) return;
     try {
-        await sb.from('sections').delete().eq('id', id).eq('company_id', companyId);
+        await sb.from('sections').delete().eq('id', id);
         await fetchSectionsData();
         refreshDashboardStats();
     } catch (err) {
@@ -781,7 +711,7 @@ function filterSections() {
 }
 
 function loadCards() {
-    if (!companyId) return;
+    if (!currentProfile) return;
     if (sections.length === 0) {
         fetchSectionsData().then(() => loadCardsData());
     } else {
@@ -791,7 +721,7 @@ function loadCards() {
 }
 
 function loadCardsData() {
-    if (!companyId) return;
+    if (!currentProfile) return;
     if (cardsChannel) {
         try {
             sb.removeChannel(cardsChannel);
@@ -800,15 +730,10 @@ function loadCardsData() {
     }
 
     cardsChannel = sb
-        .channel(`cards-live-${companyId}`)
+        .channel('cards-live')
         .on(
             'postgres_changes',
-            {
-                event: '*',
-                schema: 'public',
-                table: 'archive_cards',
-                filter: `company_id=eq.${companyId}`,
-            },
+            { event: '*', schema: 'public', table: 'archive_cards' },
             () => fetchCardsData()
         )
         .subscribe();
@@ -817,11 +742,10 @@ function loadCardsData() {
 }
 
 async function fetchCardsData() {
-    if (!companyId) return;
+    if (!currentProfile) return;
     const { data, error } = await sb
         .from('archive_cards')
         .select('*, card_attachments ( id )')
-        .eq('company_id', companyId)
         .order('created_at', { ascending: false });
     if (error) {
         console.error(error);
@@ -836,7 +760,7 @@ function updateSectionFilter() {
     if (sectionFilter) {
         sectionFilter.innerHTML = '<option value="">جميع الأقسام</option>';
         sections.forEach((section) => {
-            sectionFilter.innerHTML += `<option value="${section.id}">${section.name}</option>`;
+            sectionFilter.innerHTML += `<option value="${section.id}">${escapeHtml(section.name || '')}</option>`;
         });
     }
 }
@@ -897,19 +821,19 @@ function renderCards(cardsToRender = null) {
             <tr>
                 <td>${index + 1}</td>
                 <td>
-                    <strong>${card.title || 'بدون عنوان'}</strong>
+                    <strong>${escapeHtml(card.title || 'بدون عنوان')}</strong>
                     ${
                         card.description
-                            ? `<br><small style="color: #666;">${
+                            ? `<br><small style="color: #666;">${escapeHtml(
                                   card.description.length > 50
                                       ? card.description.substring(0, 50) + '...'
                                       : card.description
-                              }</small>`
+                              )}</small>`
                             : ''
                     }
                 </td>
-                <td>${section ? section.name : 'غير محدد'}</td>
-                <td>${card.reference || 'غير محدد'}</td>
+                <td>${section ? escapeHtml(section.name) : 'غير محدد'}</td>
+                <td>${escapeHtml(card.reference || 'غير محدد')}</td>
                 <td>${card.date || 'غير محدد'}</td>
                 <td>${statusBadge}</td>
                 <td>${priorityBadge}</td>
@@ -948,6 +872,9 @@ function renderCards(cardsToRender = null) {
                         `
                                 : ''
                         }
+                        ${
+                            canWriteArchive()
+                                ? `
                         <button onclick="editCard('${card.id}')" class="btn btn-secondary" title="تعديل">
                             <i class="fas fa-edit"></i> تعديل
                         </button>
@@ -957,6 +884,9 @@ function renderCards(cardsToRender = null) {
                         <button onclick="deleteCard('${card.id}')" class="btn btn-danger" title="حذف">
                             <i class="fas fa-trash"></i> حذف
                         </button>
+                        `
+                                : ''
+                        }
                     </div>
                 </td>
             </tr>
@@ -1020,9 +950,9 @@ async function viewCardDetails(cardId) {
 
     let detailsHTML = `
         <div style="padding: 20px;">
-            <h3 style="margin-bottom: 20px; color: #667eea;"><i class="fas fa-file-alt"></i> ${card.title || 'بدون عنوان'}</h3>
+            <h3 style="margin-bottom: 20px; color: #667eea;"><i class="fas fa-file-alt"></i> ${escapeHtml(card.title || 'بدون عنوان')}</h3>
             <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 15px; margin-bottom: 20px;">
-                <div><strong>القسم:</strong> ${section ? section.name : 'غير محدد'}</div>
+                <div><strong>القسم:</strong> ${section ? escapeHtml(section.name) : 'غير محدد'}</div>
                 <div><strong>رقم المرجع:</strong> ${card.reference || 'غير محدد'}</div>
                 <div><strong>التاريخ:</strong> ${card.date || 'غير محدد'}</div>
                 <div><strong>الحالة:</strong> ${statusText}</div>
@@ -1217,15 +1147,15 @@ async function openCardModal(id = null) {
 
     document.getElementById('cardModalTitle').textContent = id ? 'تعديل البطاقة' : 'إضافة بطاقة جديدة';
 
-    if (sections.length === 0 && companyId) {
-        const { data } = await sb.from('sections').select('*').eq('company_id', companyId).order('sort_order');
+    if (sections.length === 0) {
+        const { data } = await sb.from('sections').select('*').order('sort_order');
         sections = (data || []).map(mapSectionRow);
     }
 
     const sectionSelect = document.getElementById('cardSection');
     sectionSelect.innerHTML = '<option value="">اختر القسم</option>';
     sections.forEach((section) => {
-        sectionSelect.innerHTML += `<option value="${section.id}">${section.name}</option>`;
+        sectionSelect.innerHTML += `<option value="${section.id}">${escapeHtml(section.name || '')}</option>`;
     });
 
     if (id) {
@@ -1266,10 +1196,12 @@ document.getElementById('cardModal').addEventListener('click', (e) => {
 
 document.getElementById('cardForm').addEventListener('submit', async (e) => {
     e.preventDefault();
-    if (!companyId) return;
+    if (!canWriteArchive()) {
+        alert('ليس لديك صلاحية التعديل.');
+        return;
+    }
 
     const row = {
-        company_id: companyId,
         section_id: document.getElementById('cardSection').value || null,
         title: document.getElementById('cardTitle').value,
         reference: document.getElementById('cardReference').value || null,
@@ -1284,7 +1216,7 @@ document.getElementById('cardForm').addEventListener('submit', async (e) => {
 
     try {
         if (currentEditingId) {
-            await sb.from('archive_cards').update(row).eq('id', currentEditingId).eq('company_id', companyId);
+            await sb.from('archive_cards').update(row).eq('id', currentEditingId);
 
             const keptIds = uploadedFiles.filter((f) => f.attachmentId).map((f) => f.attachmentId);
             const { data: oldAtt } = await sb.from('card_attachments').select('id').eq('card_id', currentEditingId);
@@ -1335,10 +1267,13 @@ function editCard(id) {
 }
 
 async function deleteCard(id) {
+    if (!canWriteArchive()) {
+        alert('ليس لديك صلاحية الحذف.');
+        return;
+    }
     if (!confirm('هل أنت متأكد من حذف هذه البطاقة؟')) return;
-    if (!companyId) return;
     try {
-        await sb.from('archive_cards').delete().eq('id', id).eq('company_id', companyId);
+        await sb.from('archive_cards').delete().eq('id', id);
         await fetchCardsData();
         refreshDashboardStats();
     } catch (err) {
@@ -1367,7 +1302,7 @@ function filterCards() {
 }
 
 function loadUsers() {
-    if (!companyId) return;
+    if (!isAdmin()) return;
     if (usersChannel) {
         try {
             sb.removeChannel(usersChannel);
@@ -1376,15 +1311,10 @@ function loadUsers() {
     }
 
     usersChannel = sb
-        .channel(`profiles-live-${companyId}`)
+        .channel('profiles-live')
         .on(
             'postgres_changes',
-            {
-                event: '*',
-                schema: 'public',
-                table: 'profiles',
-                filter: `company_id=eq.${companyId}`,
-            },
+            { event: '*', schema: 'public', table: 'profiles' },
             () => fetchUsersData()
         )
         .subscribe();
@@ -1392,12 +1322,8 @@ function loadUsers() {
 }
 
 async function fetchUsersData() {
-    if (!companyId) return;
-    const { data, error } = await sb
-        .from('profiles')
-        .select('*')
-        .eq('company_id', companyId)
-        .order('created_at', { ascending: false });
+    if (!isAdmin()) return;
+    const { data, error } = await sb.from('profiles').select('*').order('created_at', { ascending: false });
     if (error) {
         console.error(error);
         return;
@@ -1477,7 +1403,10 @@ document.getElementById('userModal').addEventListener('click', (e) => {
 
 document.getElementById('userForm').addEventListener('submit', async (e) => {
     e.preventDefault();
-    if (!companyId) return;
+    if (!isAdmin()) {
+        alert('صلاحية المدير مطلوبة.');
+        return;
+    }
 
     const fullName = document.getElementById('userFullName').value;
     const email = document.getElementById('userEmail').value;
@@ -1496,8 +1425,7 @@ document.getElementById('userForm').addEventListener('submit', async (e) => {
                     phone: phone || null,
                     updated_at: new Date().toISOString(),
                 })
-                .eq('id', currentEditingId)
-                .eq('company_id', companyId);
+                .eq('id', currentEditingId);
             if (error) throw error;
             if (password) {
                 alert('تغيير كلمة المرور للمستخدم يتم من لوحة Supabase أو عبر رابط استعادة كلمة المرور.');
@@ -1519,8 +1447,7 @@ document.getElementById('userForm').addEventListener('submit', async (e) => {
                     password,
                     data: {
                         full_name: fullName,
-                        join_company: true,
-                        company_id: companyId,
+                        invited_by_admin: true,
                         role,
                         phone,
                     },
@@ -1544,10 +1471,13 @@ function editUser(id) {
 }
 
 async function deleteUser(id) {
-    if (!confirm('هل أنت متأكد من حذف هذا المستخدم من الفريق؟ (حساب الدخول قد يبقى في المصادقة)')) return;
-    if (!companyId) return;
+    if (!isAdmin()) {
+        alert('صلاحية المدير مطلوبة.');
+        return;
+    }
+    if (!confirm('هل أنت متأكد من حذف هذا المستخدم؟ (حساب الدخول قد يبقى في المصادقة)')) return;
     try {
-        const { error } = await sb.from('profiles').delete().eq('id', id).eq('company_id', companyId);
+        const { error } = await sb.from('profiles').delete().eq('id', id);
         if (error) throw error;
         await fetchUsersData();
         refreshDashboardStats();
@@ -1568,10 +1498,10 @@ function filterUsers() {
 }
 
 async function loadSettings() {
-    if (!companyId) return;
-    const { data } = await sb.from('companies').select('*').eq('id', companyId).maybeSingle();
+    if (!currentProfile) return;
+    const { data } = await sb.from('app_settings').select('*').eq('id', 1).maybeSingle();
     if (data) {
-        document.getElementById('settingsCompanyName').value = data.name || '';
+        document.getElementById('settingsOrgName').value = data.name || '';
         document.getElementById('settingsPhone').value = data.phone || '';
         document.getElementById('settingsEmail').value = data.email || '';
         document.getElementById('settingsAddress').value = data.address || '';
@@ -1581,19 +1511,22 @@ async function loadSettings() {
 
 document.getElementById('settingsForm').addEventListener('submit', async (e) => {
     e.preventDefault();
-    if (!companyId) return;
+    if (!isAdmin()) {
+        alert('صلاحية المدير مطلوبة لحفظ الإعدادات.');
+        return;
+    }
     try {
         const { error } = await sb
-            .from('companies')
+            .from('app_settings')
             .update({
-                name: document.getElementById('settingsCompanyName').value,
+                name: document.getElementById('settingsOrgName').value,
                 phone: document.getElementById('settingsPhone').value || null,
                 email: document.getElementById('settingsEmail').value || null,
                 address: document.getElementById('settingsAddress').value || null,
                 notes: document.getElementById('settingsNotes').value || null,
                 updated_at: new Date().toISOString(),
             })
-            .eq('id', companyId);
+            .eq('id', 1);
         if (error) throw error;
         alert('تم حفظ الإعدادات بنجاح');
     } catch (err) {
