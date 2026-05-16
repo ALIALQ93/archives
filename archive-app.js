@@ -77,6 +77,12 @@ const AGENT_DEBUG_SESSION =
     typeof location !== 'undefined' &&
     /(?:\?|&)(?:agent_debug=1|debug=1)(?:&|$)/.test(location.search || '');
 
+let agentRunId = /(?:\?|&)agent_run=post-fix(?:&|$)/.test(
+    typeof location !== 'undefined' ? location.search || '' : ''
+)
+    ? 'post-fix'
+    : 'pre-fix';
+
 function agentLog(hypothesisId, location, message, data) {
     if (!AGENT_DEBUG_SESSION) return;
     const payload = {
@@ -86,14 +92,48 @@ function agentLog(hypothesisId, location, message, data) {
         message,
         data: data || {},
         timestamp: Date.now(),
-        runId: 'pre-fix',
+        runId: agentRunId,
     };
+    try {
+        const key = 'debug_914ae3';
+        const arr = JSON.parse(sessionStorage.getItem(key) || '[]');
+        arr.push(payload);
+        if (arr.length > 80) arr.splice(0, arr.length - 80);
+        sessionStorage.setItem(key, JSON.stringify(arr));
+    } catch (_) {}
     fetch('http://127.0.0.1:7942/ingest/dba8d5d2-ad16-4f61-8c5a-656cf263c58b', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '914ae3' },
         body: JSON.stringify(payload),
     }).catch(() => {});
     console.info('[agent-debug]', hypothesisId, message, data || '');
+}
+
+/** ربط JWT بالعميل قبل استعلام profiles (يتجنب فشل القراءة بعد signIn مباشرة) */
+async function syncSessionOnClient(session) {
+    if (!session?.access_token) {
+        agentLog('B', 'archive-app.js:syncSessionOnClient', 'no access_token', {});
+        return false;
+    }
+    const { error } = await sb.auth.setSession({
+        access_token: session.access_token,
+        refresh_token: session.refresh_token,
+    });
+    if (error) {
+        agentLog('B', 'archive-app.js:syncSessionOnClient', 'setSession failed', {
+            msg: String(error.message || error).slice(0, 120),
+        });
+        return false;
+    }
+    const {
+        data: { session: active },
+    } = await sb.auth.getSession();
+    const ok = !!(active?.user && active.access_token);
+    agentLog('B', 'archive-app.js:syncSessionOnClient', 'getSession', {
+        ok,
+        uid: active?.user?.id || null,
+    });
+    return ok;
 }
 // #endregion
 
@@ -511,6 +551,19 @@ async function handleAuthenticatedSession(session) {
         try {
             loginDebugLog('session', { id: uid, email: session.user.email });
 
+            const sessionReady = await syncSessionOnClient(session);
+            if (!sessionReady) {
+                showLoginScreen();
+                showAlert(
+                    'loginAlert',
+                    'تعذّر تفعيل الجلسة على المتصفح. حدّث الصفحة (Ctrl+Shift+R) وحاول مرة أخرى.',
+                    'error',
+                    60000
+                );
+                await sb.auth.signOut();
+                return false;
+            }
+
             const result = await fetchMyProfileForLoginWithRetry(uid);
             const { prof, error, via } = result;
 
@@ -612,7 +665,10 @@ sb.auth.onAuthStateChange(async (event, session) => {
     });
     // #endregion
     if (session?.user) {
-        if (loginSubmitting) return;
+        if (loginSubmitting && event === 'SIGNED_IN') {
+            agentLog('A', 'archive-app.js:onAuthStateChange', 'skip SIGNED_IN (form handles)', {});
+            return;
+        }
         if (event === 'SIGNED_IN' || event === 'INITIAL_SESSION') {
             await handleAuthenticatedSession(session);
         }
@@ -667,6 +723,7 @@ document.getElementById('loginForm').addEventListener('submit', async (e) => {
             );
             return;
         }
+        await syncSessionOnClient(data.session);
         showAlert('loginAlert', 'جاري فتح الأرشيف…', 'success', 0);
 
         const opened = await handleAuthenticatedSession(data.session);
