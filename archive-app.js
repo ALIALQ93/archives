@@ -148,6 +148,52 @@ async function byteaToDataUrl(mime, content) {
     });
 }
 
+function showToast(message, type, durationMs) {
+    const container = document.getElementById('toastContainer');
+    if (!container) return;
+    const t = document.createElement('div');
+    t.className = 'toast toast-' + (type || 'info');
+    t.textContent = message;
+    container.appendChild(t);
+    const ms = durationMs !== undefined ? durationMs : 4000;
+    if (ms <= 0) return;
+    setTimeout(() => {
+        t.classList.add('toast-out');
+        setTimeout(() => t.remove(), 300);
+    }, ms);
+}
+
+function updateOrgBranding(name) {
+    const label = name && String(name).trim() ? String(name).trim() : 'نظام الأرشيف الإلكتروني';
+    document.querySelectorAll('[data-org-name]').forEach((el) => {
+        el.textContent = label;
+    });
+    document.title = label;
+}
+
+async function fetchOrgBranding() {
+    try {
+        const { data } = await sb.from('app_settings').select('name').eq('id', 1).maybeSingle();
+        if (data?.name) updateOrgBranding(data.name);
+    } catch (_) {}
+}
+
+function toggleSidebar() {
+    document.getElementById('app')?.classList.toggle('sidebar-open');
+}
+
+function closeSidebar() {
+    document.getElementById('app')?.classList.remove('sidebar-open');
+}
+
+const PAGE_TITLES = {
+    dashboard: 'لوحة التحكم',
+    sections: 'الأقسام',
+    cards: 'بطاقات الأرشيف',
+    users: 'المستخدمون',
+    settings: 'الإعدادات',
+};
+
 function showAlert(elementId, message, type, durationMs) {
     const alertDiv = document.getElementById(elementId);
     if (!alertDiv) return;
@@ -269,8 +315,8 @@ function applyRoleUI() {
         el.style.display = admin ? '' : 'none';
     });
 
-    const usersTab = document.querySelector('.tab[data-tab="users"]');
-    if (usersTab) usersTab.style.display = admin ? '' : 'none';
+    const usersNav = document.querySelector('.nav-item[data-tab="users"]');
+    if (usersNav) usersNav.style.display = admin ? '' : 'none';
 
     const settingsForm = document.getElementById('settingsForm');
     if (settingsForm) {
@@ -369,6 +415,7 @@ sb.auth.onAuthStateChange(async (_event, session) => {
                     'في SQL Editor شغّل (بعد تعديل البريد): supabase/sql/repair_login_profile.sql';
             }
 
+            document.getElementById('authWrapper').style.display = '';
             document.getElementById('loginScreen').style.display = 'block';
             document.getElementById('registerScreen').style.display = 'none';
             document.getElementById('app').style.display = 'none';
@@ -389,16 +436,18 @@ sb.auth.onAuthStateChange(async (_event, session) => {
 
         applyRoleUI();
 
-        document.getElementById('loginScreen').style.display = 'none';
-        document.getElementById('registerScreen').style.display = 'none';
-        document.getElementById('app').style.display = 'block';
+        document.getElementById('authWrapper').style.display = 'none';
+        document.getElementById('app').style.display = 'flex';
+        fetchOrgBranding();
         loadDashboard();
     } else {
         currentUser = null;
         currentProfile = null;
         teardownAllRealtime();
         stopDashboardPolling();
+        document.getElementById('authWrapper').style.display = '';
         document.getElementById('loginScreen').style.display = 'block';
+        document.getElementById('registerScreen').style.display = 'none';
         document.getElementById('app').style.display = 'none';
         checkRegistrationOpen();
     }
@@ -500,31 +549,21 @@ function showRegister() {
 
 function switchTab(tabName, event) {
     if (tabName === 'users' && !isAdmin()) return;
-    document.querySelectorAll('.tab').forEach((tab) => tab.classList.remove('active'));
-    document.querySelectorAll('.tab-content').forEach((content) => content.classList.remove('active'));
+    document.querySelectorAll('.nav-item').forEach((n) => n.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach((c) => c.classList.remove('active'));
 
-    if (event && event.target) {
-        event.target.classList.add('active');
-    } else {
-        document.querySelectorAll('.tab').forEach((tab) => {
-            if (
-                tab.textContent.includes(
-                    tabName === 'dashboard'
-                        ? 'لوحة التحكم'
-                        : tabName === 'sections'
-                          ? 'الأقسام'
-                          : tabName === 'cards'
-                            ? 'بطاقات'
-                            : tabName === 'users'
-                              ? 'المستخدمون'
-                              : 'الإعدادات'
-                )
-            ) {
-                tab.classList.add('active');
-            }
-        });
-    }
-    document.getElementById(tabName).classList.add('active');
+    const nav =
+        (event && event.target && event.target.closest('.nav-item')) ||
+        document.querySelector('.nav-item[data-tab="' + tabName + '"]');
+    if (nav) nav.classList.add('active');
+
+    const page = document.getElementById(tabName);
+    if (page) page.classList.add('active');
+
+    const titleEl = document.getElementById('pageTitle');
+    if (titleEl) titleEl.textContent = PAGE_TITLES[tabName] || '';
+
+    closeSidebar();
 
     if (tabName === 'sections') loadSections();
     if (tabName === 'cards') loadCards();
@@ -644,9 +683,9 @@ async function exportData() {
         link.download = `archive_export_${new Date().toISOString().split('T')[0]}.json`;
         link.click();
         URL.revokeObjectURL(url);
-        alert('تم تصدير البيانات بنجاح');
+        showToast('تم تصدير البيانات بنجاح', 'success');
     } catch (error) {
-        alert('خطأ في تصدير البيانات: ' + error.message);
+        showToast('خطأ في تصدير البيانات: ' + error.message, 'error');
     }
 }
 
@@ -721,7 +760,12 @@ function renderSections(sectionsToRender = null) {
     const sectionsList = sectionsToRender || sections;
 
     if (sectionsList.length === 0) {
-        container.innerHTML = '<div class="table-empty"><p>لا توجد أقسام</p></div>';
+        container.innerHTML =
+            '<div class="empty-state"><i class="fas fa-folder-open empty-icon"></i><p>لا توجد أقسام بعد</p>' +
+            (canWriteArchive()
+                ? '<button type="button" class="btn btn-primary btn-sm" onclick="openSectionModal()"><i class="fas fa-plus"></i> إضافة قسم</button>'
+                : '') +
+            '</div>';
         return;
     }
 
@@ -914,7 +958,12 @@ function renderCards(cardsToRender = null) {
     const cardsList = cardsToRender || cards;
 
     if (cardsList.length === 0) {
-        container.innerHTML = '<div class="table-empty"><p>لا توجد بطاقات</p></div>';
+        container.innerHTML =
+            '<div class="empty-state"><i class="fas fa-file-alt empty-icon"></i><p>لا توجد بطاقات بعد</p>' +
+            (canWriteArchive()
+                ? '<button type="button" class="btn btn-primary btn-sm" onclick="openCardModal()"><i class="fas fa-plus"></i> إضافة بطاقة</button>'
+                : '') +
+            '</div>';
         return;
     }
 
@@ -1673,6 +1722,7 @@ async function loadSettings() {
         document.getElementById('settingsEmail').value = data.email || '';
         document.getElementById('settingsAddress').value = data.address || '';
         document.getElementById('settingsNotes').value = data.notes || '';
+        updateOrgBranding(data.name);
     }
 }
 
@@ -1695,9 +1745,10 @@ document.getElementById('settingsForm').addEventListener('submit', async (e) => 
             })
             .eq('id', 1);
         if (error) throw error;
-        alert('تم حفظ الإعدادات بنجاح');
+        updateOrgBranding(document.getElementById('settingsOrgName').value);
+        showToast('تم حفظ الإعدادات بنجاح', 'success');
     } catch (err) {
-        alert('خطأ: ' + err.message);
+        showToast('خطأ: ' + err.message, 'error');
     }
 });
 
