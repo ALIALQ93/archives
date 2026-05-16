@@ -72,6 +72,31 @@ let usersChannel = null;
 let dashboardInterval = null;
 let loginSubmitting = false;
 
+// #region agent log
+const AGENT_DEBUG_SESSION =
+    typeof location !== 'undefined' &&
+    /(?:\?|&)(?:agent_debug=1|debug=1)(?:&|$)/.test(location.search || '');
+
+function agentLog(hypothesisId, location, message, data) {
+    if (!AGENT_DEBUG_SESSION) return;
+    const payload = {
+        sessionId: '914ae3',
+        hypothesisId,
+        location,
+        message,
+        data: data || {},
+        timestamp: Date.now(),
+        runId: 'pre-fix',
+    };
+    fetch('http://127.0.0.1:7942/ingest/dba8d5d2-ad16-4f61-8c5a-656cf263c58b', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '914ae3' },
+        body: JSON.stringify(payload),
+    }).catch(() => {});
+    console.info('[agent-debug]', hypothesisId, message, data || '');
+}
+// #endregion
+
 function teardownDashboardChannels() {
     dashboardChannels.forEach((ch) => {
         try {
@@ -383,6 +408,15 @@ async function fetchMyProfileForLoginWithRetry(userId, attempts) {
     for (let i = 0; i < max; i++) {
         if (i > 0) await new Promise((r) => setTimeout(r, 180 * i));
         last = await fetchMyProfileForLogin(userId);
+        // #region agent log
+        agentLog('B', 'archive-app.js:fetchMyProfileForLoginWithRetry', 'profile attempt', {
+            attempt: i + 1,
+            hasProf: !!last.prof,
+            via: last.via,
+            errCode: last.error?.code,
+            errMsg: last.error?.message ? String(last.error.message).slice(0, 120) : null,
+        });
+        // #endregion
         if (last.prof) return last;
         loginDebugLog('profile-retry', { attempt: i + 1, error: last.error });
     }
@@ -404,6 +438,14 @@ function showLoginScreen() {
 }
 
 function showMainApp(session, prof, via) {
+    // #region agent log
+    agentLog('C', 'archive-app.js:showMainApp', 'enter', {
+        via,
+        role: prof?.role,
+        hasAuthWrap: !!document.getElementById('authWrapper'),
+        hasApp: !!document.getElementById('app'),
+    });
+    // #endregion
     const normRole = normalizeRole(prof.role);
     currentProfile = { ...prof, role: normRole };
     currentUser = session.user;
@@ -430,6 +472,12 @@ function showMainApp(session, prof, via) {
 
     fetchOrgBranding();
     loadDashboard();
+    // #region agent log
+    agentLog('C', 'archive-app.js:showMainApp', 'after display', {
+        authDisplay: document.getElementById('authWrapper')?.style?.display,
+        appDisplay: document.getElementById('app')?.style?.display,
+    });
+    // #endregion
 }
 
 /**
@@ -439,12 +487,23 @@ async function handleAuthenticatedSession(session) {
     if (!session?.user) return false;
 
     const uid = session.user.id;
+    // #region agent log
+    agentLog('D', 'archive-app.js:handleAuthenticatedSession', 'enter', {
+        uid,
+        hasPending: !!pendingSessionEnter,
+        hasCurrentProfile: !!currentProfile,
+        loginSubmitting,
+    });
+    // #endregion
     if (currentProfile && currentUser?.id === uid) {
         showMainApp(session, currentProfile, 'cache');
         return true;
     }
 
     if (pendingSessionEnter) {
+        // #region agent log
+        agentLog('D', 'archive-app.js:handleAuthenticatedSession', 'await pending', { uid });
+        // #endregion
         return pendingSessionEnter;
     }
 
@@ -458,6 +517,13 @@ async function handleAuthenticatedSession(session) {
             if (!prof) {
                 loginDebugLog('profile-failed', { error, via });
                 console.error('ملف المستخدم (profiles) غير متاح:', error);
+                // #region agent log
+                agentLog('B', 'archive-app.js:handleAuthenticatedSession', 'profile missing', {
+                    via,
+                    errCode: error?.code,
+                    errMsg: error?.message ? String(error.message).slice(0, 120) : null,
+                });
+                // #endregion
                 showLoginScreen();
                 showAlert('loginAlert', formatProfileLoadError(error, session), 'error', 90000);
                 await sb.auth.signOut();
@@ -465,6 +531,9 @@ async function handleAuthenticatedSession(session) {
             }
 
             showMainApp(session, prof, via);
+            // #region agent log
+            agentLog('D', 'archive-app.js:handleAuthenticatedSession', 'success', { via, role: prof.role });
+            // #endregion
             return true;
         } catch (err) {
             console.error('[login] خطأ غير متوقع:', err);
@@ -534,12 +603,23 @@ function loginDebugLog(step, detail) {
 
 sb.auth.onAuthStateChange(async (event, session) => {
     loginDebugLog('auth-event', event);
+    // #region agent log
+    agentLog('A', 'archive-app.js:onAuthStateChange', 'event', {
+        event,
+        hasSession: !!session?.user,
+        loginSubmitting,
+        skipped: !!(session?.user && loginSubmitting),
+    });
+    // #endregion
     if (session?.user) {
         if (loginSubmitting) return;
         if (event === 'SIGNED_IN' || event === 'INITIAL_SESSION') {
             await handleAuthenticatedSession(session);
         }
     } else if (event === 'SIGNED_OUT') {
+        // #region agent log
+        agentLog('E', 'archive-app.js:onAuthStateChange', 'SIGNED_OUT', {});
+        // #endregion
         currentUser = null;
         currentProfile = null;
         teardownAllRealtime();
@@ -566,7 +646,17 @@ document.getElementById('loginForm').addEventListener('submit', async (e) => {
 
     try {
         loginDebugLog('signIn-start', email);
+        // #region agent log
+        agentLog('A', 'archive-app.js:loginForm', 'submit', { hasEmail: !!email });
+        // #endregion
         const { data, error } = await sb.auth.signInWithPassword({ email, password });
+        // #region agent log
+        agentLog('A', 'archive-app.js:loginForm', 'signIn result', {
+            ok: !error,
+            hasSession: !!data?.session,
+            errMsg: error?.message ? String(error.message).slice(0, 80) : null,
+        });
+        // #endregion
         if (error) throw error;
         if (!data.session) {
             showAlert(
@@ -580,6 +670,9 @@ document.getElementById('loginForm').addEventListener('submit', async (e) => {
         showAlert('loginAlert', 'جاري فتح الأرشيف…', 'success', 0);
 
         const opened = await handleAuthenticatedSession(data.session);
+        // #region agent log
+        agentLog('D', 'archive-app.js:loginForm', 'handleAuthenticatedSession done', { opened });
+        // #endregion
         if (!opened) {
             return;
         }
