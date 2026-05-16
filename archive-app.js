@@ -389,11 +389,24 @@ async function fetchMyProfileForLoginWithRetry(userId, attempts) {
     return last;
 }
 
-let authSessionHandling = false;
+/** وعد واحد — يمنع تضارب نموذج الدخول مع onAuthStateChange */
+let pendingSessionEnter = null;
+
+function showLoginScreen() {
+    const authWrap = document.getElementById('authWrapper');
+    const loginScreen = document.getElementById('loginScreen');
+    const registerScreen = document.getElementById('registerScreen');
+    const appEl = document.getElementById('app');
+    if (authWrap) authWrap.style.display = '';
+    if (loginScreen) loginScreen.style.display = 'block';
+    if (registerScreen) registerScreen.style.display = 'none';
+    if (appEl) appEl.style.display = 'none';
+}
 
 function showMainApp(session, prof, via) {
     const normRole = normalizeRole(prof.role);
     currentProfile = { ...prof, role: normRole };
+    currentUser = session.user;
     const name = prof.full_name || session.user.email || '';
     const nameEl = document.getElementById('userName');
     if (nameEl) nameEl.textContent = name + ' — ' + roleLabel(normRole);
@@ -405,6 +418,12 @@ function showMainApp(session, prof, via) {
     if (authWrap) authWrap.style.display = 'none';
     if (appEl) appEl.style.display = 'flex';
 
+    const loginAlert = document.getElementById('loginAlert');
+    if (loginAlert) {
+        loginAlert.textContent = '';
+        loginAlert.className = '';
+    }
+
     if (via === 'rpc') {
         console.info('[profiles] تم تحميل الملف عبر get_my_profile (RPC)');
     }
@@ -413,39 +432,59 @@ function showMainApp(session, prof, via) {
     loadDashboard();
 }
 
+/**
+ * @returns {Promise<boolean>} true إذا فُتح التطبيق
+ */
 async function handleAuthenticatedSession(session) {
-    if (!session?.user || authSessionHandling) return;
-    if (currentProfile && currentUser?.id === session.user.id) return;
-    authSessionHandling = true;
-    try {
-        currentUser = session.user;
-        loginDebugLog('session', { id: session.user.id, email: session.user.email });
+    if (!session?.user) return false;
 
-        const result = await fetchMyProfileForLoginWithRetry(session.user.id);
-        const { prof, error, via } = result;
-
-        if (!prof) {
-            loginDebugLog('profile-failed', { error, via });
-            console.error('ملف المستخدم (profiles) غير متاح:', error);
-
-            const loginScreen = document.getElementById('loginScreen');
-            const registerScreen = document.getElementById('registerScreen');
-            const authWrap = document.getElementById('authWrapper');
-            const appEl = document.getElementById('app');
-            if (authWrap) authWrap.style.display = '';
-            if (loginScreen) loginScreen.style.display = 'block';
-            if (registerScreen) registerScreen.style.display = 'none';
-            if (appEl) appEl.style.display = 'none';
-
-            showAlert('loginAlert', formatProfileLoadError(error, session), 'error', 90000);
-            await sb.auth.signOut();
-            return;
-        }
-
-        showMainApp(session, prof, via);
-    } finally {
-        authSessionHandling = false;
+    const uid = session.user.id;
+    if (currentProfile && currentUser?.id === uid) {
+        showMainApp(session, currentProfile, 'cache');
+        return true;
     }
+
+    if (pendingSessionEnter) {
+        return pendingSessionEnter;
+    }
+
+    pendingSessionEnter = (async () => {
+        try {
+            loginDebugLog('session', { id: uid, email: session.user.email });
+
+            const result = await fetchMyProfileForLoginWithRetry(uid);
+            const { prof, error, via } = result;
+
+            if (!prof) {
+                loginDebugLog('profile-failed', { error, via });
+                console.error('ملف المستخدم (profiles) غير متاح:', error);
+                showLoginScreen();
+                showAlert('loginAlert', formatProfileLoadError(error, session), 'error', 90000);
+                await sb.auth.signOut();
+                return false;
+            }
+
+            showMainApp(session, prof, via);
+            return true;
+        } catch (err) {
+            console.error('[login] خطأ غير متوقع:', err);
+            showLoginScreen();
+            showAlert(
+                'loginAlert',
+                'خطأ أثناء فتح التطبيق: ' + ((err && err.message) || String(err)),
+                'error',
+                60000
+            );
+            try {
+                await sb.auth.signOut();
+            } catch (_) {}
+            return false;
+        } finally {
+            pendingSessionEnter = null;
+        }
+    })();
+
+    return pendingSessionEnter;
 }
 
 /** رسالة واضحة عند فشل قراءة profiles بعد نجاح Auth */
@@ -493,22 +532,19 @@ function loginDebugLog(step, detail) {
     console.info('[login-debug]', step, detail !== undefined ? detail : '');
 }
 
-sb.auth.onAuthStateChange(async (_event, session) => {
+sb.auth.onAuthStateChange(async (event, session) => {
+    loginDebugLog('auth-event', event);
     if (session?.user) {
-        await handleAuthenticatedSession(session);
-    } else {
+        if (loginSubmitting) return;
+        if (event === 'SIGNED_IN' || event === 'INITIAL_SESSION') {
+            await handleAuthenticatedSession(session);
+        }
+    } else if (event === 'SIGNED_OUT') {
         currentUser = null;
         currentProfile = null;
         teardownAllRealtime();
         stopDashboardPolling();
-        const authWrap = document.getElementById('authWrapper');
-        const loginScreen = document.getElementById('loginScreen');
-        const registerScreen = document.getElementById('registerScreen');
-        const appEl = document.getElementById('app');
-        if (authWrap) authWrap.style.display = '';
-        if (loginScreen) loginScreen.style.display = 'block';
-        if (registerScreen) registerScreen.style.display = 'none';
-        if (appEl) appEl.style.display = 'none';
+        showLoginScreen();
         checkRegistrationOpen();
     }
 });
@@ -541,8 +577,13 @@ document.getElementById('loginForm').addEventListener('submit', async (e) => {
             );
             return;
         }
-        showAlert('loginAlert', 'تم التحقق — جاري فتح الأرشيف…', 'success', 5000);
-        await handleAuthenticatedSession(data.session);
+        showAlert('loginAlert', 'جاري فتح الأرشيف…', 'success', 0);
+
+        const opened = await handleAuthenticatedSession(data.session);
+        if (!opened) {
+            return;
+        }
+        showAlert('loginAlert', '', 'success', 0);
     } catch (error) {
         showAlert('loginAlert', 'خطأ في تسجيل الدخول: ' + formatAuthError(error, 'signIn'), 'error');
     } finally {
