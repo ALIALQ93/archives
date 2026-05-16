@@ -12,30 +12,41 @@ create table if not exists public.app_settings (
   updated_at timestamptz not null default now()
 );
 
-insert into public.app_settings (id, name, phone, email, address, notes)
-select
-  1,
-  coalesce(nullif(trim(c.name), ''), 'نظام الأرشيف'),
-  c.phone,
-  c.email,
-  c.address,
-  c.notes
-from public.companies c
-order by c.created_at
-limit 1
-on conflict (id) do update set
-  name = coalesce(nullif(excluded.name, ''), app_settings.name),
-  phone = coalesce(excluded.phone, app_settings.phone),
-  email = coalesce(excluded.email, app_settings.email),
-  address = coalesce(excluded.address, app_settings.address),
-  notes = coalesce(excluded.notes, app_settings.notes),
-  updated_at = now();
+-- نقل بيانات الشركة إن وُجد الجدول (قد يكون محذوفاً مسبقاً)
+do $$
+begin
+  if to_regclass('public.companies') is not null then
+    insert into public.app_settings (id, name, phone, email, address, notes)
+    select
+      1,
+      coalesce(nullif(trim(c.name), ''), 'نظام الأرشيف'),
+      c.phone,
+      c.email,
+      c.address,
+      c.notes
+    from public.companies c
+    order by c.created_at
+    limit 1
+    on conflict (id) do update set
+      name = coalesce(nullif(excluded.name, ''), app_settings.name),
+      phone = coalesce(excluded.phone, app_settings.phone),
+      email = coalesce(excluded.email, app_settings.email),
+      address = coalesce(excluded.address, app_settings.address),
+      notes = coalesce(excluded.notes, app_settings.notes),
+      updated_at = now();
+  end if;
+end $$;
 
 insert into public.app_settings (id) values (1) on conflict (id) do nothing;
 
 -- إزالة سياسات قديمة قبل حذف الجداول
-drop policy if exists companies_select on public.companies;
-drop policy if exists companies_update on public.companies;
+do $$
+begin
+  if to_regclass('public.companies') is not null then
+    drop policy if exists companies_select on public.companies;
+    drop policy if exists companies_update on public.companies;
+  end if;
+end $$;
 drop policy if exists profiles_select on public.profiles;
 drop policy if exists profiles_update on public.profiles;
 drop policy if exists profiles_delete_admin on public.profiles;
@@ -145,6 +156,28 @@ $$;
 alter table public.app_settings enable row level security;
 
 drop function if exists public.is_company_admin();
+
+-- إسقاط السياسات القديمة والجديدة (آمن لإعادة التشغيل)
+drop policy if exists app_settings_select on public.app_settings;
+drop policy if exists app_settings_update on public.app_settings;
+drop policy if exists profiles_select on public.profiles;
+drop policy if exists profiles_update on public.profiles;
+drop policy if exists profiles_delete_admin on public.profiles;
+drop policy if exists sections_all on public.sections;
+drop policy if exists sections_select on public.sections;
+drop policy if exists sections_write on public.sections;
+drop policy if exists sections_update on public.sections;
+drop policy if exists sections_delete on public.sections;
+drop policy if exists cards_all on public.archive_cards;
+drop policy if exists cards_select on public.archive_cards;
+drop policy if exists cards_write on public.archive_cards;
+drop policy if exists cards_update on public.archive_cards;
+drop policy if exists cards_delete on public.archive_cards;
+drop policy if exists attachments_all on public.card_attachments;
+drop policy if exists attachments_select on public.card_attachments;
+drop policy if exists attachments_write on public.card_attachments;
+drop policy if exists attachments_update on public.card_attachments;
+drop policy if exists attachments_delete on public.card_attachments;
 
 create policy app_settings_select on public.app_settings
   for select to authenticated using (true);
