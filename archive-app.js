@@ -360,7 +360,7 @@ async function fetchMyProfileForLogin(userId) {
 
     let row = rpcRes.data;
     if (Array.isArray(row)) row = row.length ? row[0] : null;
-    if (row && typeof row === 'object' && row.id) {
+    if (row && typeof row === 'object') {
         return {
             prof: {
                 full_name: row.full_name,
@@ -374,6 +374,78 @@ async function fetchMyProfileForLogin(userId) {
     }
 
     return { prof: null, error: tableErr, via: null };
+}
+
+/** إعادة المحاولة — JWT قد لا يكون جاهزاً فور signIn */
+async function fetchMyProfileForLoginWithRetry(userId, attempts) {
+    const max = attempts !== undefined ? attempts : 6;
+    let last = { prof: null, error: null, via: null };
+    for (let i = 0; i < max; i++) {
+        if (i > 0) await new Promise((r) => setTimeout(r, 180 * i));
+        last = await fetchMyProfileForLogin(userId);
+        if (last.prof) return last;
+        loginDebugLog('profile-retry', { attempt: i + 1, error: last.error });
+    }
+    return last;
+}
+
+let authSessionHandling = false;
+
+function showMainApp(session, prof, via) {
+    const normRole = normalizeRole(prof.role);
+    currentProfile = { ...prof, role: normRole };
+    const name = prof.full_name || session.user.email || '';
+    const nameEl = document.getElementById('userName');
+    if (nameEl) nameEl.textContent = name + ' — ' + roleLabel(normRole);
+
+    applyRoleUI();
+
+    const authWrap = document.getElementById('authWrapper');
+    const appEl = document.getElementById('app');
+    if (authWrap) authWrap.style.display = 'none';
+    if (appEl) appEl.style.display = 'flex';
+
+    if (via === 'rpc') {
+        console.info('[profiles] تم تحميل الملف عبر get_my_profile (RPC)');
+    }
+
+    fetchOrgBranding();
+    loadDashboard();
+}
+
+async function handleAuthenticatedSession(session) {
+    if (!session?.user || authSessionHandling) return;
+    if (currentProfile && currentUser?.id === session.user.id) return;
+    authSessionHandling = true;
+    try {
+        currentUser = session.user;
+        loginDebugLog('session', { id: session.user.id, email: session.user.email });
+
+        const result = await fetchMyProfileForLoginWithRetry(session.user.id);
+        const { prof, error, via } = result;
+
+        if (!prof) {
+            loginDebugLog('profile-failed', { error, via });
+            console.error('ملف المستخدم (profiles) غير متاح:', error);
+
+            const loginScreen = document.getElementById('loginScreen');
+            const registerScreen = document.getElementById('registerScreen');
+            const authWrap = document.getElementById('authWrapper');
+            const appEl = document.getElementById('app');
+            if (authWrap) authWrap.style.display = '';
+            if (loginScreen) loginScreen.style.display = 'block';
+            if (registerScreen) registerScreen.style.display = 'none';
+            if (appEl) appEl.style.display = 'none';
+
+            showAlert('loginAlert', formatProfileLoadError(error, session), 'error', 90000);
+            await sb.auth.signOut();
+            return;
+        }
+
+        showMainApp(session, prof, via);
+    } finally {
+        authSessionHandling = false;
+    }
 }
 
 /** رسالة واضحة عند فشل قراءة profiles بعد نجاح Auth */
@@ -423,55 +495,20 @@ function loginDebugLog(step, detail) {
 
 sb.auth.onAuthStateChange(async (_event, session) => {
     if (session?.user) {
-        currentUser = session.user;
-
-        let result = await fetchMyProfileForLogin(session.user.id);
-        if (result.error || !result.prof) {
-            await new Promise((r) => setTimeout(r, 350));
-            result = await fetchMyProfileForLogin(session.user.id);
-        }
-        const { prof, error, via } = result;
-
-        if (error || !prof) {
-            loginDebugLog('profile-failed', { error, prof, via });
-            console.error('ملف المستخدم (profiles) غير متاح:', error || prof);
-
-            const msg = formatProfileLoadError(error, session);
-
-            document.getElementById('authWrapper').style.display = '';
-            document.getElementById('loginScreen').style.display = 'block';
-            document.getElementById('registerScreen').style.display = 'none';
-            document.getElementById('app').style.display = 'none';
-            showAlert('loginAlert', msg, 'error', 60000);
-
-            await sb.auth.signOut();
-            return;
-        }
-
-        if (via === 'rpc') {
-            console.info('[profiles] تم تحميل الملف عبر get_my_profile (RPC) — يتجاوز قيود RLS');
-        }
-
-        const normRole = normalizeRole(prof.role);
-        currentProfile = { ...prof, role: normRole };
-        const name = prof.full_name || session.user.email || '';
-        document.getElementById('userName').textContent = name + ' — ' + roleLabel(normRole);
-
-        applyRoleUI();
-
-        document.getElementById('authWrapper').style.display = 'none';
-        document.getElementById('app').style.display = 'flex';
-        fetchOrgBranding();
-        loadDashboard();
+        await handleAuthenticatedSession(session);
     } else {
         currentUser = null;
         currentProfile = null;
         teardownAllRealtime();
         stopDashboardPolling();
-        document.getElementById('authWrapper').style.display = '';
-        document.getElementById('loginScreen').style.display = 'block';
-        document.getElementById('registerScreen').style.display = 'none';
-        document.getElementById('app').style.display = 'none';
+        const authWrap = document.getElementById('authWrapper');
+        const loginScreen = document.getElementById('loginScreen');
+        const registerScreen = document.getElementById('registerScreen');
+        const appEl = document.getElementById('app');
+        if (authWrap) authWrap.style.display = '';
+        if (loginScreen) loginScreen.style.display = 'block';
+        if (registerScreen) registerScreen.style.display = 'none';
+        if (appEl) appEl.style.display = 'none';
         checkRegistrationOpen();
     }
 });
@@ -504,29 +541,8 @@ document.getElementById('loginForm').addEventListener('submit', async (e) => {
             );
             return;
         }
-        const u = data.session.user;
-        if (u && u.email_confirmed_at === null && u.confirmed_at === null) {
-            showAlert(
-                'loginAlert',
-                'البريد غير مؤكد بعد. افتح رابط التأكيد من بريدك، أو من Supabase عطّل Confirm email للتجربة.',
-                'error',
-                20000
-            );
-            await sb.auth.signOut();
-            return;
-        }
-        showAlert('loginAlert', 'جاري التحقق من الحساب…', 'success', 4000);
-        const profileCheck = await fetchMyProfileForLogin(u.id);
-        loginDebugLog('profile-after-signIn', profileCheck);
-        if (!profileCheck.prof) {
-            showAlert(
-                'loginAlert',
-                formatProfileLoadError(profileCheck.error, data.session),
-                'error',
-                90000
-            );
-            await sb.auth.signOut();
-        }
+        showAlert('loginAlert', 'تم التحقق — جاري فتح الأرشيف…', 'success', 5000);
+        await handleAuthenticatedSession(data.session);
     } catch (error) {
         showAlert('loginAlert', 'خطأ في تسجيل الدخول: ' + formatAuthError(error, 'signIn'), 'error');
     } finally {
