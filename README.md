@@ -19,6 +19,7 @@ npm run serve
    - `supabase/migrations/20260516120000_super_admin_role_column_sync.sql` (إن وُجدت)
    - **`supabase/migrations/20260517120000_single_organization.sql`** ← مطلوب (مؤسسة واحدة)
    - **`supabase/migrations/20260517130000_fix_user_invite_metadata.sql`** ← مطلوب (إنشاء المستخدمين)
+   - **`supabase/migrations/20260517150000_get_my_profile_rpc.sql`** ← يُنصح به إذا تعذّرت قراءة `profiles` بعد الدخول
 3. انسخ `config.example.js` إلى `config.js` واملأ `url` و `anonKey` من لوحة المشروع → Settings → API.
 4. (اختياري) عطّل التسجيل العام من Authentication → Providers إذا أردت أن يضيف المدير المستخدمين فقط.
 
@@ -39,8 +40,9 @@ npm run serve
 (`profiles.id` يجب أن يكون مساوياً لـ `auth.users.id` حرفياً).
 
 1. جرّب تسجيل الدخول وافتح **F12 → Console** وانسخ السطر الذي يبدأ بـ `[إصلاح الدخول] معرف حساب المصادقة`.
-2. في Supabase → **SQL Editor** عدّل البريد في الملف ثم شغّله:
-   - `supabase/sql/repair_login_profile.sql`
+2. في Supabase → **SQL Editor** شغّل `supabase/sql/diagnose_login.sql` (بعد تغيير البريد) وتأكد أن `auth_id` = `profile_id`.
+3. إن اختلفا، عدّل البريد في `supabase/sql/repair_login_profile.sql` ثم نفّذه.
+4. نفّذ أيضاً **`supabase/migrations/20260517150000_get_my_profile_rpc.sql`** ثم حدّث الصفحة (البرنامج يستخدمها تلقائياً إن فشل الاستعلام المباشر).
 
 إن ظهر خطأ **permission denied** على `profiles`، نفس الملف يمنح `SELECT` لـ `authenticated`.
 

@@ -70,6 +70,7 @@ let sectionChannel = null;
 let cardsChannel = null;
 let usersChannel = null;
 let dashboardInterval = null;
+let loginSubmitting = false;
 
 function teardownDashboardChannels() {
     dashboardChannels.forEach((ch) => {
@@ -291,14 +292,54 @@ async function checkRegistrationOpen() {
     if (registerBtn) registerBtn.style.display = registrationOpen ? '' : 'none';
 }
 
+/** جلب ملف المستخدم: استعلام جدول ثم دالة RPC إذا فشل الـ RLS */
+async function fetchMyProfileForLogin(userId) {
+    const fromTable = await sb
+        .from('profiles')
+        .select('full_name, role, phone, email')
+        .eq('id', userId)
+        .maybeSingle();
+
+    if (!fromTable.error && fromTable.data) {
+        return { prof: fromTable.data, error: null, via: 'table' };
+    }
+
+    const tableErr = fromTable.error;
+    const rpcRes = await sb.rpc('get_my_profile');
+
+    if (rpcRes.error) {
+        console.warn('[profiles] فشل الجدول ثم فشل get_my_profile:', tableErr, rpcRes.error);
+        return { prof: null, error: tableErr || rpcRes.error, via: null };
+    }
+
+    let row = rpcRes.data;
+    if (Array.isArray(row)) row = row.length ? row[0] : null;
+    if (row && typeof row === 'object' && row.id) {
+        return {
+            prof: {
+                full_name: row.full_name,
+                role: row.role,
+                phone: row.phone,
+                email: row.email,
+            },
+            error: null,
+            via: 'rpc',
+        };
+    }
+
+    return { prof: null, error: tableErr, via: null };
+}
+
 sb.auth.onAuthStateChange(async (_event, session) => {
     if (session?.user) {
         currentUser = session.user;
-        const { data: prof, error } = await sb
-            .from('profiles')
-            .select('full_name, role, phone, email')
-            .eq('id', session.user.id)
-            .maybeSingle();
+
+        let result = await fetchMyProfileForLogin(session.user.id);
+        if (result.error || !result.prof) {
+            await new Promise((r) => setTimeout(r, 350));
+            result = await fetchMyProfileForLogin(session.user.id);
+        }
+        const { prof, error, via } = result;
 
         if (error || !prof) {
             console.error('ملف المستخدم (profiles) غير متاح:', error || prof);
@@ -312,16 +353,20 @@ sb.auth.onAuthStateChange(async (_event, session) => {
 
             let msg;
             if (error) {
+                const hint =
+                    (error.message && String(error.message).includes('get_my_profile')) ||
+                    (error.message && String(error.message).includes('function'))
+                        ? '\n\nنفّذ في SQL Editor: supabase/migrations/20260517150000_get_my_profile_rpc.sql'
+                        : '';
                 msg =
-                    'لا يمكن قراءة جدول profiles (خطأ من الخادم). إن ظهر «permission denied» فجرّب تشغيل ملف إصلاح الصلاحيات في مجلد supabase/sql من لوحة SQL.\nالتفاصيل: ' +
-                    (error.message || JSON.stringify(error));
+                    'لا يمكن قراءة جدول profiles. إن ظهر «permission denied» أو PGRST شغّل إصلاح الصلاحيات والدالة من مجلد migrations.\nالتفاصيل: ' +
+                    (error.message || JSON.stringify(error)) +
+                    hint;
             } else {
                 msg =
                     'تم الدخول بنجاح، لكن لا يوجد صف في جدول profiles يطابق هذا الحساب.\n' +
-                    'غالباً تم ضبط صلاحية admin على صف قديم أو معرف مختلف.\n' +
-                    'افتح وحدة التحكم (F12) وانسخ «معرف حساب المصادقة» ثم في Supabase → SQL Editor شغّل الإصلاح من الملف:\n' +
-                    'supabase/sql/repair_login_profile.sql\n' +
-                    '(أو أنشئ صفاً في profiles حيث id = ذلك المعرف و role = admin).';
+                    'غالباً تم ضبط admin على صف بمعرف قديم.\n' +
+                    'في SQL Editor شغّل (بعد تعديل البريد): supabase/sql/repair_login_profile.sql';
             }
 
             document.getElementById('loginScreen').style.display = 'block';
@@ -333,10 +378,14 @@ sb.auth.onAuthStateChange(async (_event, session) => {
             return;
         }
 
-        currentProfile = { ...prof, role: normalizeRole(prof.role) };
+        if (via === 'rpc') {
+            console.info('[profiles] تم تحميل الملف عبر get_my_profile (RPC) — يتجاوز قيود RLS');
+        }
+
+        const normRole = normalizeRole(prof.role);
+        currentProfile = { ...prof, role: normRole };
         const name = prof.full_name || session.user.email || '';
-        document.getElementById('userName').textContent =
-            name + ' — ' + roleLabel(prof.role);
+        document.getElementById('userName').textContent = name + ' — ' + roleLabel(normRole);
 
         applyRoleUI();
 
@@ -357,15 +406,26 @@ sb.auth.onAuthStateChange(async (_event, session) => {
 
 document.getElementById('loginForm').addEventListener('submit', async (e) => {
     e.preventDefault();
+    if (loginSubmitting) return;
+
     const email = document.getElementById('loginEmail').value.trim();
     const password = document.getElementById('loginPassword').value;
+    const btn = document.getElementById('loginSubmitBtn');
+    const prevText = btn ? btn.textContent : '';
+
+    loginSubmitting = true;
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = 'جاري الدخول…';
+    }
+
     try {
         const { data, error } = await sb.auth.signInWithPassword({ email, password });
         if (error) throw error;
         if (!data.session) {
             showAlert(
                 'loginAlert',
-                'لم تُنشأ جلسة — غالباً البريد غير مؤكد. راجع البريد أو عطّل تأكيد البريد من لوحة Supabase.',
+                'لم تُنشأ جلسة — غالباً البريد غير مؤكد. راجع البريد أو عطّل تأكيد البريد من لوحة Supabase (Authentication → Providers → Email → Confirm email).',
                 'error',
                 15000
             );
@@ -374,6 +434,12 @@ document.getElementById('loginForm').addEventListener('submit', async (e) => {
         showAlert('loginAlert', 'جاري التحقق من الحساب…', 'success', 4000);
     } catch (error) {
         showAlert('loginAlert', 'خطأ في تسجيل الدخول: ' + formatAuthError(error, 'signIn'), 'error');
+    } finally {
+        loginSubmitting = false;
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = prevText;
+        }
     }
 });
 
