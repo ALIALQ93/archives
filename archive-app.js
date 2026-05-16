@@ -376,6 +376,51 @@ async function fetchMyProfileForLogin(userId) {
     return { prof: null, error: tableErr, via: null };
 }
 
+/** رسالة واضحة عند فشل قراءة profiles بعد نجاح Auth */
+function formatProfileLoadError(error, session) {
+    const uid = session?.user?.id || '(غير معروف)';
+    const email = session?.user?.email || '';
+    if (!error) {
+        return (
+            'تم التحقق من كلمة المرور، لكن لا يوجد صف في جدول profiles يطابق حسابك.\n' +
+            'المعرف المطلوب في profiles.id: ' +
+            uid +
+            '\nالبريد: ' +
+            email +
+            '\n\nشغّل في SQL Editor: supabase/sql/repair_login_profile.sql (بعد تعديل البريد).'
+        );
+    }
+    const msg = error.message || String(error);
+    const code = error.code || error.details || '';
+    let hint = '';
+    if (/permission denied|42501|pgrst/i.test(msg + code)) {
+        hint = '\n\nشغّل: supabase/sql/full_setup_single_org.sql (قسم الصلاحيات والسياسات).';
+    } else if (/get_my_profile|42883|does not exist/i.test(msg + code)) {
+        hint = '\n\nشغّل: supabase/migrations/20260517150000_get_my_profile_rpc.sql';
+    } else if (/company_id|is_super_admin/i.test(msg)) {
+        hint = '\n\nالمتصفح يحمّل نسخة قديمة من archive-app.js — حدّث GitHub ثم Ctrl+Shift+R.';
+    }
+    return (
+        'فشل تحميل ملف المستخدم (profiles) رغم نجاح تسجيل الدخول.\n' +
+        'المعرف: ' +
+        uid +
+        ' | البريد: ' +
+        email +
+        '\nالخطأ: ' +
+        msg +
+        (code ? '\nالتفاصيل: ' + code : '') +
+        hint
+    );
+}
+
+const LOGIN_DEBUG =
+    typeof location !== 'undefined' && /(?:\?|&)debug=1(?:&|$)/.test(location.search || '');
+
+function loginDebugLog(step, detail) {
+    if (!LOGIN_DEBUG) return;
+    console.info('[login-debug]', step, detail !== undefined ? detail : '');
+}
+
 sb.auth.onAuthStateChange(async (_event, session) => {
     if (session?.user) {
         currentUser = session.user;
@@ -388,32 +433,10 @@ sb.auth.onAuthStateChange(async (_event, session) => {
         const { prof, error, via } = result;
 
         if (error || !prof) {
+            loginDebugLog('profile-failed', { error, prof, via });
             console.error('ملف المستخدم (profiles) غير متاح:', error || prof);
-            console.warn(
-                '[إصلاح الدخول] معرف حساب المصادقة auth.uid:',
-                session.user.id,
-                '| البريد:',
-                session.user.email,
-                '\nيجب أن يكون عمود profiles.id مساوياً لهذا المعرف تماماً.'
-            );
 
-            let msg;
-            if (error) {
-                const hint =
-                    (error.message && String(error.message).includes('get_my_profile')) ||
-                    (error.message && String(error.message).includes('function'))
-                        ? '\n\nنفّذ في SQL Editor: supabase/migrations/20260517150000_get_my_profile_rpc.sql'
-                        : '';
-                msg =
-                    'لا يمكن قراءة جدول profiles. إن ظهر «permission denied» أو PGRST شغّل إصلاح الصلاحيات والدالة من مجلد migrations.\nالتفاصيل: ' +
-                    (error.message || JSON.stringify(error)) +
-                    hint;
-            } else {
-                msg =
-                    'تم الدخول بنجاح، لكن لا يوجد صف في جدول profiles يطابق هذا الحساب.\n' +
-                    'غالباً تم ضبط admin على صف بمعرف قديم.\n' +
-                    'في SQL Editor شغّل (بعد تعديل البريد): supabase/sql/repair_login_profile.sql';
-            }
+            const msg = formatProfileLoadError(error, session);
 
             document.getElementById('authWrapper').style.display = '';
             document.getElementById('loginScreen').style.display = 'block';
@@ -469,6 +492,7 @@ document.getElementById('loginForm').addEventListener('submit', async (e) => {
     }
 
     try {
+        loginDebugLog('signIn-start', email);
         const { data, error } = await sb.auth.signInWithPassword({ email, password });
         if (error) throw error;
         if (!data.session) {
@@ -480,7 +504,29 @@ document.getElementById('loginForm').addEventListener('submit', async (e) => {
             );
             return;
         }
+        const u = data.session.user;
+        if (u && u.email_confirmed_at === null && u.confirmed_at === null) {
+            showAlert(
+                'loginAlert',
+                'البريد غير مؤكد بعد. افتح رابط التأكيد من بريدك، أو من Supabase عطّل Confirm email للتجربة.',
+                'error',
+                20000
+            );
+            await sb.auth.signOut();
+            return;
+        }
         showAlert('loginAlert', 'جاري التحقق من الحساب…', 'success', 4000);
+        const profileCheck = await fetchMyProfileForLogin(u.id);
+        loginDebugLog('profile-after-signIn', profileCheck);
+        if (!profileCheck.prof) {
+            showAlert(
+                'loginAlert',
+                formatProfileLoadError(profileCheck.error, data.session),
+                'error',
+                90000
+            );
+            await sb.auth.signOut();
+        }
     } catch (error) {
         showAlert('loginAlert', 'خطأ في تسجيل الدخول: ' + formatAuthError(error, 'signIn'), 'error');
     } finally {
