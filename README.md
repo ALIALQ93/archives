@@ -14,6 +14,17 @@
    - **Redirect URLs:** نفس الرابط (وأضف `http://localhost:3000` للتطوير المحلي)
 4. مفاتيح Supabase على الاستضافة: وسوم `meta` في `index.html` (لا يُرفع `config.js` — مُستثنى في `.gitignore`).
 
+### خطأ CORS أو `Failed to fetch` أو 521 / 522
+
+هذا **ليس** من GitHub Pages في العادة. المتصفح يعرض «CORS» عندما لا يرد خادم Supabase (مشروع متوقف أو معطّل).
+
+1. افتح [لوحة Supabase](https://supabase.com/dashboard) → مشروع `zajewewtlxykqvcailnh`.
+2. إن ظهر **Paused** اضغط **Restore project** وانتظر حتى يصبح الحالة **Active** (قد يستغرق دقائق).
+3. **Authentication → URL Configuration:**
+   - **Site URL:** `https://alialq93.github.io`
+   - **Redirect URLs:** `https://alialq93.github.io/**` و `http://localhost:3000/**`
+4. حدّث صفحة الموقع (Ctrl+Shift+R) وجرّب الدخول مجدداً.
+
 ## التشغيل المحلي
 
 ```bash

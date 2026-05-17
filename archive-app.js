@@ -46,13 +46,12 @@ const sb = _create(SUPABASE_URL, SUPABASE_ANON_KEY, {
 document.addEventListener('DOMContentLoaded', function () {
     checkRegistrationOpen();
     if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
-        var m = document.createElement('div');
-        m.setAttribute('dir', 'rtl');
-        m.style.cssText =
-            'background:#fff3e0;border-bottom:2px solid #ff9800;color:#e65100;padding:14px 20px;font-size:14px;text-align:center;line-height:1.6;';
-        m.innerHTML =
-            '<strong>إعداد Supabase ناقص:</strong> أضف وسوم meta في <code>index.html</code> أو ملف <code>config.js</code> — راجع لوحة المشروع → Settings → API.';
-        document.body.insertBefore(m, document.body.firstChild);
+        showAppBanner(
+            '<strong>إعداد Supabase ناقص:</strong> أضف وسوم meta في <code>index.html</code> أو ملف <code>config.js</code> — راجع لوحة المشروع → Settings → API.',
+            'warn'
+        );
+    } else {
+        checkSupabaseReachability();
     }
 });
 
@@ -226,6 +225,65 @@ function showAlert(elementId, message, type, durationMs) {
     }, ms);
 }
 
+function showAppBanner(html, variant) {
+    const id = 'appTopBanner';
+    let el = document.getElementById(id);
+    if (!el) {
+        el = document.createElement('div');
+        el.id = id;
+        el.setAttribute('dir', 'rtl');
+        document.body.insertBefore(el, document.body.firstChild);
+    }
+    const styles = {
+        warn: 'background:#fff3e0;border-bottom:2px solid #ff9800;color:#e65100;',
+        error: 'background:#ffebee;border-bottom:2px solid #f44336;color:#b71c1c;',
+    };
+    el.style.cssText =
+        (styles[variant] || styles.warn) +
+        'padding:14px 20px;font-size:14px;text-align:center;line-height:1.65;z-index:10000;position:relative;';
+    el.innerHTML = html;
+}
+
+/** أخطاء شبكة / 521 / 522 — المتصفح يعرضها أحياناً كـ CORS */
+function isSupabaseReachabilityError(error) {
+    const msg = ((error && error.message) || String(error || '')).toLowerCase();
+    const name = ((error && error.name) || '').toLowerCase();
+    return (
+        name.includes('authretryablefetch') ||
+        msg.includes('failed to fetch') ||
+        msg.includes('networkerror') ||
+        msg.includes('load failed') ||
+        msg.includes('network request failed')
+    );
+}
+
+async function checkSupabaseReachability() {
+    if (!SUPABASE_URL || !SUPABASE_ANON_KEY) return;
+    try {
+        const res = await fetch(SUPABASE_URL.replace(/\/$/, '') + '/auth/v1/health', {
+            method: 'GET',
+            headers: { apikey: SUPABASE_ANON_KEY },
+        });
+        if (res.status >= 500) {
+            const ref = SUPABASE_URL.replace(/^https?:\/\//, '').split('.')[0];
+            showAppBanner(
+                '<strong>خادم Supabase غير متاح</strong> (رمز ' +
+                    res.status +
+                    '). افتح <a href="https://supabase.com/dashboard/project/' +
+                    ref +
+                    '" target="_blank" rel="noopener">لوحة المشروع</a> وتأكد أنه <strong>غير متوقف</strong> (Restore project).',
+                'error'
+            );
+        }
+    } catch (_) {
+        showAppBanner(
+            '<strong>لا يمكن الاتصال بـ Supabase</strong> — إن ظهر في المتصفح «CORS» فغالباً المشروع متوقف أو الخادم معطّل (521/522). ' +
+                'من <a href="https://supabase.com/dashboard" target="_blank" rel="noopener">لوحة Supabase</a>: Restore project ثم انتظر دقائق.',
+            'error'
+        );
+    }
+}
+
 /** ترجمة أخطاء المصادقة الشائعة + إظهار التفاصيل في وحدة التحكم */
 function formatAuthError(error, context) {
     if (context) console.warn('[auth]', context, error);
@@ -245,6 +303,13 @@ function formatAuthError(error, context) {
     }
     if (lower.includes('user already registered') || lower.includes('already been registered')) {
         return 'هذا البريد مسجّل مسبقاً.';
+    }
+    if (isSupabaseReachabilityError(error)) {
+        return (
+            'تعذّر الاتصال بخادم Supabase (قد يظهر في F12 كخطأ CORS أو 521/522). ' +
+            'افتح supabase.com/dashboard → مشروعك → Restore project إن كان متوقفاً، ثم أعد المحاولة بعد دقائق. ' +
+            'بعد التشغيل: Authentication → URL Configuration → Site URL = https://alialq93.github.io'
+        );
     }
     return msg + (error && error.status ? ` (رمز HTTP: ${error.status})` : '');
 }
