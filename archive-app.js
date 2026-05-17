@@ -71,6 +71,11 @@ let cardsChannel = null;
 let usersChannel = null;
 let dashboardInterval = null;
 let loginSubmitting = false;
+/** يمنع أن محاولة دخول قديمة (INITIAL_SESSION) تُخرجك بعد نجاح محاولة أحدث */
+let sessionEnterGeneration = 0;
+let pendingSessionUserId = null;
+/** آخر تقرير تشخيص — للنسخ من واجهة الدخول */
+let lastLoginDiagnostic = null;
 
 // #region agent log
 const AGENT_DEBUG_SESSION =
@@ -441,12 +446,27 @@ async function fetchMyProfileForLogin(userId) {
     return { prof: null, error: tableErr, via: null };
 }
 
-/** إعادة المحاولة — JWT قد لا يكون جاهزاً فور signIn */
-async function fetchMyProfileForLoginWithRetry(userId, attempts) {
-    const max = attempts !== undefined ? attempts : 6;
+function isLikelyTransientProfileError(error) {
+    if (!error) return true;
+    const blob = ((error.message || '') + ' ' + (error.code || '') + ' ' + (error.details || '')).toLowerCase();
+    return /permission|jwt|pgrst|42501|network|fetch|timeout|502|503|504|failed|abort|load/.test(blob);
+}
+
+function profileRetryDelayMs(attemptIndex) {
+    return Math.min(3200, 250 + attemptIndex * 220);
+}
+
+/** إعادة المحاولة — JWT قد لا يكون جاهزاً فور signIn أو عند INITIAL_SESSION */
+async function fetchMyProfileForLoginWithRetry(userId, session, attempts) {
+    const max = attempts !== undefined ? attempts : 10;
     let last = { prof: null, error: null, via: null };
     for (let i = 0; i < max; i++) {
-        if (i > 0) await new Promise((r) => setTimeout(r, 180 * i));
+        if (i > 0) {
+            await new Promise((r) => setTimeout(r, profileRetryDelayMs(i)));
+        }
+        if (session) {
+            await syncSessionOnClient(session);
+        }
         last = await fetchMyProfileForLogin(userId);
         // #region agent log
         agentLog('B', 'archive-app.js:fetchMyProfileForLoginWithRetry', 'profile attempt', {
@@ -459,8 +479,64 @@ async function fetchMyProfileForLoginWithRetry(userId, attempts) {
         // #endregion
         if (last.prof) return last;
         loginDebugLog('profile-retry', { attempt: i + 1, error: last.error });
+        if (!isLikelyTransientProfileError(last.error) && i >= 2) break;
     }
     return last;
+}
+
+function buildLoginDiagnostic(session, result, extra) {
+    const uid = session?.user?.id || null;
+    const email = session?.user?.email || null;
+    return {
+        time: new Date().toISOString(),
+        authUserId: uid,
+        email,
+        profileLoaded: !!result?.prof,
+        via: result?.via || null,
+        error: result?.error
+            ? {
+                  message: result.error.message || String(result.error),
+                  code: result.error.code || null,
+                  details: result.error.details || null,
+              }
+            : result?.prof
+              ? null
+              : { message: 'لا يوجد صف في profiles لهذا المعرف (أو لم يُقرأ بعد)' },
+        supabaseUrl: SUPABASE_URL || '(غير مضبوط)',
+        hint:
+            'قارن authUserId مع profiles.id في Supabase → SQL: supabase/sql/diagnose_login.sql',
+        ...extra,
+    };
+}
+
+function logLoginDiagnostic(session, result, extra) {
+    const report = buildLoginDiagnostic(session, result, extra);
+    lastLoginDiagnostic = report;
+    console.error('[إصلاح الدخول] معرف حساب المصادقة:', report.authUserId, '| البريد:', report.email);
+    console.error('[إصلاح الدخول] التفاصيل الكاملة:', report);
+    updateLoginDiagnosticUI(true);
+    return report;
+}
+
+function updateLoginDiagnosticUI(show) {
+    const hint = document.getElementById('loginDiagnosticsHint');
+    const btn = document.getElementById('loginCopyDiagnosticBtn');
+    if (hint) hint.style.display = show ? 'block' : 'none';
+    if (btn) btn.style.display = show ? 'inline-flex' : 'none';
+}
+
+async function copyLoginDiagnostic() {
+    if (!lastLoginDiagnostic) {
+        showToast('لا يوجد تقرير بعد — جرّب تسجيل الدخول مرة أخرى', 'info');
+        return;
+    }
+    const text = JSON.stringify(lastLoginDiagnostic, null, 2);
+    try {
+        await navigator.clipboard.writeText(text);
+        showToast('تم نسخ تقرير التشخيص', 'success');
+    } catch (_) {
+        prompt('انسخ التقرير:', text);
+    }
 }
 
 /** وعد واحد — يمنع تضارب نموذج الدخول مع onAuthStateChange */
@@ -523,36 +599,48 @@ function showMainApp(session, prof, via) {
 /**
  * @returns {Promise<boolean>} true إذا فُتح التطبيق
  */
+function isStaleSessionEnter(generation) {
+    return generation !== sessionEnterGeneration;
+}
+
 async function handleAuthenticatedSession(session) {
     if (!session?.user) return false;
 
     const uid = session.user.id;
+    const generation = ++sessionEnterGeneration;
     // #region agent log
     agentLog('D', 'archive-app.js:handleAuthenticatedSession', 'enter', {
         uid,
+        generation,
         hasPending: !!pendingSessionEnter,
         hasCurrentProfile: !!currentProfile,
         loginSubmitting,
     });
     // #endregion
     if (currentProfile && currentUser?.id === uid) {
+        updateLoginDiagnosticUI(false);
         showMainApp(session, currentProfile, 'cache');
         return true;
     }
 
-    if (pendingSessionEnter) {
+    if (pendingSessionEnter && pendingSessionUserId === uid) {
         // #region agent log
         agentLog('D', 'archive-app.js:handleAuthenticatedSession', 'await pending', { uid });
         // #endregion
         return pendingSessionEnter;
     }
 
+    pendingSessionUserId = uid;
     pendingSessionEnter = (async () => {
         try {
-            loginDebugLog('session', { id: uid, email: session.user.email });
+            loginDebugLog('session', { id: uid, email: session.user.email, generation });
 
             const sessionReady = await syncSessionOnClient(session);
+            if (isStaleSessionEnter(generation)) return false;
             if (!sessionReady) {
+                logLoginDiagnostic(session, { prof: null, error: { message: 'setSession/getSession failed' } }, {
+                    step: 'syncSessionOnClient',
+                });
                 showLoginScreen();
                 showAlert(
                     'loginAlert',
@@ -560,16 +648,24 @@ async function handleAuthenticatedSession(session) {
                     'error',
                     60000
                 );
-                await sb.auth.signOut();
+                if (!isStaleSessionEnter(generation)) await sb.auth.signOut();
                 return false;
             }
 
-            const result = await fetchMyProfileForLoginWithRetry(uid);
+            const loginAlert = document.getElementById('loginAlert');
+            if (loginAlert && loginSubmitting) {
+                loginAlert.textContent = 'جاري تحميل ملف المستخدم…';
+                loginAlert.className = 'alert alert-success';
+            }
+
+            const result = await fetchMyProfileForLoginWithRetry(uid, session);
             const { prof, error, via } = result;
+
+            if (isStaleSessionEnter(generation)) return false;
 
             if (!prof) {
                 loginDebugLog('profile-failed', { error, via });
-                console.error('ملف المستخدم (profiles) غير متاح:', error);
+                logLoginDiagnostic(session, result, { step: 'fetchMyProfile', attempts: 10 });
                 // #region agent log
                 agentLog('B', 'archive-app.js:handleAuthenticatedSession', 'profile missing', {
                     via,
@@ -579,30 +675,38 @@ async function handleAuthenticatedSession(session) {
                 // #endregion
                 showLoginScreen();
                 showAlert('loginAlert', formatProfileLoadError(error, session), 'error', 90000);
-                await sb.auth.signOut();
+                if (!isStaleSessionEnter(generation)) await sb.auth.signOut();
                 return false;
             }
 
+            updateLoginDiagnosticUI(false);
+            lastLoginDiagnostic = null;
             showMainApp(session, prof, via);
             // #region agent log
             agentLog('D', 'archive-app.js:handleAuthenticatedSession', 'success', { via, role: prof.role });
             // #endregion
             return true;
         } catch (err) {
-            console.error('[login] خطأ غير متوقع:', err);
-            showLoginScreen();
-            showAlert(
-                'loginAlert',
-                'خطأ أثناء فتح التطبيق: ' + ((err && err.message) || String(err)),
-                'error',
-                60000
-            );
-            try {
-                await sb.auth.signOut();
-            } catch (_) {}
+            if (!isStaleSessionEnter(generation)) {
+                logLoginDiagnostic(session, { prof: null, error: err }, { step: 'exception' });
+                console.error('[login] خطأ غير متوقع:', err);
+                showLoginScreen();
+                showAlert(
+                    'loginAlert',
+                    'خطأ أثناء فتح التطبيق: ' + ((err && err.message) || String(err)),
+                    'error',
+                    60000
+                );
+                try {
+                    await sb.auth.signOut();
+                } catch (_) {}
+            }
             return false;
         } finally {
-            pendingSessionEnter = null;
+            if (pendingSessionUserId === uid) {
+                pendingSessionEnter = null;
+                pendingSessionUserId = null;
+            }
         }
     })();
 
@@ -665,8 +769,8 @@ sb.auth.onAuthStateChange(async (event, session) => {
     });
     // #endregion
     if (session?.user) {
-        if (loginSubmitting && event === 'SIGNED_IN') {
-            agentLog('A', 'archive-app.js:onAuthStateChange', 'skip SIGNED_IN (form handles)', {});
+        if (loginSubmitting && (event === 'SIGNED_IN' || event === 'INITIAL_SESSION')) {
+            agentLog('A', 'archive-app.js:onAuthStateChange', 'skip during form login', { event });
             return;
         }
         if (event === 'SIGNED_IN' || event === 'INITIAL_SESSION') {
@@ -733,8 +837,10 @@ document.getElementById('loginForm').addEventListener('submit', async (e) => {
         if (!opened) {
             return;
         }
+        updateLoginDiagnosticUI(false);
         showAlert('loginAlert', '', 'success', 0);
     } catch (error) {
+        console.error('[إصلاح الدخول] فشل signIn:', formatAuthError(error, 'signIn'));
         showAlert('loginAlert', 'خطأ في تسجيل الدخول: ' + formatAuthError(error, 'signIn'), 'error');
     } finally {
         loginSubmitting = false;
