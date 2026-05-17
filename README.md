@@ -2,6 +2,18 @@
 
 تطبيق ويب عربي (RTL) لإدارة أرشيف مؤسسة واحدة مع Supabase.
 
+## الاستضافة على GitHub Pages
+
+الموقع يُنشر تلقائياً عند الدفع إلى فرع `main` عبر [GitHub Actions](.github/workflows/pages.yml).
+
+1. في المستودع: **Settings → Pages → Build and deployment** اختر **GitHub Actions**.
+2. بعد نجاح أول workflow، الرابط المتوقع:  
+   **https://alialq93.github.io/archives/**
+3. في لوحة Supabase → **Authentication → URL Configuration**:
+   - **Site URL:** `https://alialq93.github.io/archives/`
+   - **Redirect URLs:** نفس الرابط (وأضف `http://localhost:3000` للتطوير المحلي)
+4. مفاتيح Supabase على الاستضافة: وسوم `meta` في `index.html` (لا يُرفع `config.js` — مُستثنى في `.gitignore`).
+
 ## التشغيل المحلي
 
 ```bash
@@ -39,7 +51,7 @@ npm run serve
 غالباً **معرف الصف في `profiles` لا يطابق** معرف الحساب في **Authentication → Users**  
 (`profiles.id` يجب أن يكون مساوياً لـ `auth.users.id` حرفياً).
 
-1. جرّب تسجيل الدخول وافتح **F12 → Console** وانسخ السطر الذي يبدأ بـ `[إصلاح الدخول] معرف حساب المصادقة`.
+1. جرّب تسجيل الدخول وافتح **F12 → Console** وانسخ السطر الذي يبدأ بـ `[login] معرف حساب المصادقة`.
 2. في Supabase → **SQL Editor** شغّل `supabase/sql/diagnose_login.sql` (بعد تغيير البريد) وتأكد أن `auth_id` = `profile_id`.
 3. إن اختلفا، عدّل البريد في `supabase/sql/repair_login_profile.sql` ثم نفّذه.
 4. نفّذ أيضاً **`supabase/migrations/20260517150000_get_my_profile_rpc.sql`** ثم حدّث الصفحة (البرنامج يستخدمها تلقائياً إن فشل الاستعلام المباشر).
