@@ -625,9 +625,12 @@ async function handleAuthenticatedSession(session) {
 
     if (pendingSessionEnter && pendingSessionUserId === uid) {
         // #region agent log
-        agentLog('D', 'archive-app.js:handleAuthenticatedSession', 'await pending', { uid });
+        agentLog('D', 'archive-app.js:handleAuthenticatedSession', 'await pending', { uid, generation });
         // #endregion
-        return pendingSessionEnter;
+        const priorOutcome = await pendingSessionEnter;
+        if (priorOutcome) return true;
+        if (currentProfile && currentUser?.id === uid) return true;
+        if (isStaleSessionEnter(generation)) return false;
     }
 
     pendingSessionUserId = uid;
